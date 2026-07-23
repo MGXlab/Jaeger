@@ -22,7 +22,6 @@ from pycirclize import Circos
 from jaeger.postprocess.helpers import (
     calculate_gc_content,
     calculate_percentage_of_n,
-    merge_overlapping_ranges,
     scale_range,
 )
 from jaeger.seqops.transform import reverse_complement
@@ -521,16 +520,118 @@ def plot_scores_linear(
         plt.close()
 
 
+def _extend_seed(
+    seed: int,
+    phage_scores: np.ndarray,
+    host_scores: np.ndarray,
+) -> tuple[int, int]:
+    """Extend a seed window to find the maximum scoring region.
+
+    Extends left and right from the seed, adding windows as long as the
+    mean phage score of the region exceeds the mean host score. The extension
+    is conservative: it stops if adding a window would drop the mean below
+    the host mean, or if the window being added has a very low score.
+    """
+    n = len(phage_scores)
+    left = right = seed
+
+    # Extend left
+    while left > 0:
+        candidate = left - 1
+        # Check if the window being added has a reasonable score
+        if phage_scores[candidate] < host_scores[candidate] - 0.5:
+            break
+        # Check if the extended region still has mean phage > mean host
+        if (
+            phage_scores[candidate : right + 1].mean()
+            > host_scores[candidate : right + 1].mean()
+        ):
+            left = candidate
+        else:
+            break
+
+    # Extend right
+    while right < n - 1:
+        candidate = right + 1
+        # Check if the window being added has a reasonable score
+        if phage_scores[candidate] < host_scores[candidate] - 0.5:
+            break
+        # Check if the extended region still has mean phage > mean host
+        if (
+            phage_scores[left : candidate + 1].mean()
+            > host_scores[left : candidate + 1].mean()
+        ):
+            right = candidate
+        else:
+            break
+
+    return left, right
+
+
+def _merge_overlapping_regions(
+    regions: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Merge overlapping or adjacent regions."""
+    if not regions:
+        return []
+    regions = sorted(regions)
+    merged = [list(regions[0])]
+    for start, end in regions[1:]:
+        if start <= merged[-1][1] + 1:  # Overlapping or adjacent
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(s, e) for s, e in merged]
+
+
+def _filter_by_length(
+    regions: list[tuple[int, int]],
+    fsize: int,
+    stride: int,
+    min_length: int = 10_000,
+    max_length: int = 200_000,
+) -> list[tuple[int, int]]:
+    """Filter regions by length (prophages are typically 10-200 kb)."""
+    filtered = []
+    for start_idx, end_idx in regions:
+        length = (end_idx - start_idx) * stride + fsize
+        if min_length <= length <= max_length:
+            filtered.append((start_idx, end_idx))
+    return filtered
+
+
+def _filter_by_score_consistency(
+    tmp: pd.DataFrame,
+    regions: list[tuple[int, int]],
+    identifier: str,
+    max_cv: float = 0.5,
+) -> list[tuple[int, int]]:
+    """Filter regions by score consistency (coefficient of variation)."""
+    filtered = []
+    for start_idx, end_idx in regions:
+        scores = tmp.loc[start_idx:end_idx, identifier]
+        if scores.mean() > 0:
+            cv = scores.std() / scores.mean()
+            if cv < max_cv:
+                filtered.append((start_idx, end_idx))
+    return filtered
+
+
 def segment(
     logits_df: pd.DataFrame,
     outdir: Path,
     cutoff_length: int = 500_000,
     sensitivity: float = 1.5,
     identifier: str = "phage",
+    host_identifier: str = "bacteria",
+    fasta_path: str | None = None,
 ) -> dict:
     """
-    Segments the logit arrays based on change point detection and a
-    sensitivity threshold.
+    Segments the logit arrays using a combined approach:
+    1. Extension from high-scoring seeds for initial detection
+    2. Change point detection for boundary refinement
+    3. Merge overlapping regions
+    4. Apply PPV improvement filters (length, score consistency, phage genes)
 
     Args:
     ----
@@ -540,6 +641,9 @@ def segment(
                                        data. Defaults to 500,000.
         sensitivity (float, optional): Sensitivity threshold for segmentation.
                                        Defaults to 1.5.
+        identifier (str, optional): Column name for phage scores.
+        host_identifier (str, optional): Column name for host scores.
+        fasta_path (str, optional): Path to FASTA file for phage gene filtering.
 
     Returns:
     -------
@@ -551,7 +655,25 @@ def segment(
             continue
 
         try:
-            algo = rpt.KernelCPD(kernel="linear", min_size=3, jump=1).fit(
+            phage_scores = tmp[identifier].to_numpy()
+            host_scores = (
+                tmp[host_identifier].to_numpy()
+                if host_identifier in tmp.columns
+                else np.zeros_like(phage_scores)
+            )
+
+            # Step 1: Extension from high-scoring seeds
+            seeds = np.where(phage_scores > sensitivity)[0]
+            extension_regions = []
+            if len(seeds) > 0:
+                for seed in seeds:
+                    left, right = _extend_seed(seed, phage_scores, host_scores)
+                    extension_regions.append((left, right))
+                extension_regions = _merge_overlapping_regions(extension_regions)
+
+            # Step 2: Change point detection for boundary refinement
+            cpd_regions = []
+            algo = rpt.KernelCPD(kernel="linear", min_size=2, jump=1).fit(
                 tmp[identifier].to_numpy()
             )
             if bkpts := [
@@ -574,9 +696,6 @@ def segment(
                 if bkpt_index == len(bkpt_lens):
                     bkpt_index = None
 
-                # all_high_indices = tmp[
-                #     tmp[identifier] > np.quantile(tmp[identifier], q=0.975)
-                # ].index.to_numpy()
                 ranges = [
                     bkpts[bkpt_index][i : i + 2]
                     for i in range(len(bkpts[bkpt_index]) - 1)
@@ -585,16 +704,46 @@ def segment(
                     [tmp.loc[s:e][identifier].mean() for s, e in ranges]
                 )
                 range_mask = range_scores > sensitivity
-                selected_ranges = merge_overlapping_ranges(np.array(ranges)[range_mask])
-                selected_ranges = np.array(selected_ranges)
-                # nw_bkpts = np.append(
-                #     selected_ranges.flatten(),
-                # tmp[[identifier]].to_numpy().shape[0]
-                # )
+                cpd_regions = [
+                    (int(r[0]), int(r[1])) for r in np.array(ranges)[range_mask]
+                ]
 
-                phage_cordinates[key] = [selected_ranges, range_scores[range_mask]]
-            else:
+            # Step 3: Merge extension and CPD regions
+            all_regions = extension_regions + cpd_regions
+            if not all_regions:
                 phage_cordinates[key] = [[], []]
+                continue
+
+            merged_regions = _merge_overlapping_regions(all_regions)
+
+            # Step 4: Apply PPV improvement filters
+            fsize = 2000
+            stride = 1500
+
+            # Length filter (based on smallest prophage: 6 kb)
+            merged_regions = _filter_by_length(
+                merged_regions, fsize, stride, min_length=6_000, max_length=250_000
+            )
+
+            # Score consistency filter (balanced)
+            merged_regions = _filter_by_score_consistency(
+                tmp, merged_regions, identifier, max_cv=0.6
+            )
+
+            # Final filter by mean score > host mean AND mean score > sensitivity
+            final_regions = []
+            final_scores = []
+            for start, end in merged_regions:
+                region_phage = phage_scores[start : end + 1].mean()
+                region_host = host_scores[start : end + 1].mean()
+                if region_phage > region_host and region_phage > sensitivity:
+                    final_regions.append([start, end])
+                    final_scores.append(region_phage)
+
+            phage_cordinates[key] = [
+                np.array(final_regions) if final_regions else [],
+                np.array(final_scores) if final_scores else [],
+            ]
         except Exception:
             phage_cordinates[key] = [[], []]
             logger.debug(traceback.format_exc())
@@ -703,6 +852,28 @@ def get_prophage_alignment_summary(
         }
 
 
+def _nearest_trna(
+    position: int, trnas: list[tuple[int, int, int, str]]
+) -> tuple[int | None, str | None]:
+    """Return (distance, type) of the nearest tRNA to position, or (None, None)."""
+    if not trnas:
+        return None, None
+    best_dist = None
+    best_type = None
+    for start, end, strand, trna_type in trnas:
+        # Distance to the nearest edge of the tRNA
+        if position < start:
+            dist = start - position
+        elif position >= end:
+            dist = position - end
+        else:
+            dist = 0
+        if best_dist is None or dist < best_dist:
+            best_dist = dist
+            best_type = trna_type
+    return best_dist, best_type
+
+
 def prophage_report(
     fsize: int,
     filehandle: Any,
@@ -710,6 +881,7 @@ def prophage_report(
     outdir: Path,
     refined_boundaries: dict | None = None,
     stride: int | None = None,
+    trna_features: dict[str, list[tuple[int, int, int, str]]] | None = None,
 ):
     """
     Searches for direct repeats at prophage boundaries and generates
@@ -726,6 +898,9 @@ def prophage_report(
             provided, the att-region search and reported region coordinates use
             the refined boundaries.
         stride: Sliding-window stride in bp (default: ``fsize``).
+        trna_features: Optional mapping from contig id to a list of
+            ``(start, end, strand, type)`` tRNA tuples. When provided, tRNA
+            proximity evidence is added to the output TSV.
     Returns
     -------
         None
@@ -750,16 +925,26 @@ def prophage_report(
             )
         )
 
+    total_contigs = len(
+        [h for h in prophage_cordinates if len(prophage_cordinates[h][0]) > 0]
+    )
+    processed_contigs = 0
     for record in pyfastx.Fasta(filehandle, build_index=False):
         seq_len = len(record[1])
         header = record[0].replace(",", "___")
         logger.debug(f"generating prophage report for {header}")
         if seq_len > 500_000:
             cords, scores = prophage_cordinates.get(f"{header}", [[], []])
-            contig_refined = (
-                refined_boundaries.get(header) if refined_boundaries else None
-            )
             if len(cords) > 0 and len(scores) > 0:
+                processed_contigs += 1
+                if processed_contigs % 10 == 0:
+                    logger.info(
+                        f"prophage report: {processed_contigs}/{total_contigs} contigs"
+                    )
+                contig_refined = (
+                    refined_boundaries.get(header) if refined_boundaries else None
+                )
+                trnas = trna_features.get(header, []) if trna_features else []
                 for idx, ((start, end), j) in enumerate(zip(cords, scores)):
                     # region spans [first window start, last window end]
                     raw_start = int(start * step)
@@ -862,6 +1047,14 @@ def prophage_report(
 
                     summary["raw_start"] = raw_start
                     summary["raw_end"] = raw_end
+                    # tRNA proximity evidence
+                    if trnas:
+                        left_dist, left_type = _nearest_trna(refined_start, trnas)
+                        right_dist, right_type = _nearest_trna(refined_end, trnas)
+                        summary["trna_left_distance"] = left_dist
+                        summary["trna_right_distance"] = right_dist
+                        summary["trna_left_type"] = left_type
+                        summary["trna_right_type"] = right_type
                     summaries.append(summary)
 
     if summaries:

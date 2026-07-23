@@ -236,8 +236,13 @@ def health(**kwargs):
 @click.option(
     "--plot-type",
     type=click.Choice(["circular", "linear", "both", "none"]),
-    default="circular",
-    help="Prophage plot type: circular (default), linear, both, or none",
+    default="none",
+    help="Prophage plot type: circular, linear, both, or none (default)",
+)
+@click.option(
+    "--interactive-plot",
+    is_flag=True,
+    help="Generate interactive HTML genome plots for prophage regions",
 )
 @click.option(
     "--rc",

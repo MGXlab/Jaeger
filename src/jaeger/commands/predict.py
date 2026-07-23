@@ -272,6 +272,7 @@ def _write_prediction_outputs(
     term_repeats: Any,
     num: int,
     logger: Any,
+    annotations: dict | None = None,
     **kwargs: Any,
 ) -> None:
     """Run post-processing (summary, refinement, prophages, aux files) once.
@@ -358,6 +359,7 @@ def _write_prediction_outputs(
             prophage_report,
             segment,
         )
+        from jaeger.postprocess.interactive_plot import plot_scores_html
 
         try:
             if logits_df := logits_to_df_v2(
@@ -375,6 +377,7 @@ def _write_prediction_outputs(
                 for d in [pro_dir, plots_dir]:
                     d.mkdir(parents=True, exist_ok=True)
 
+                logger.info("running prophage segmentation")
                 phage_cord = segment(
                     logits_df,
                     outdir=plots_dir,
@@ -382,16 +385,112 @@ def _write_prediction_outputs(
                     sensitivity=kwargs.get("sensitivity"),
                     identifier="phage",
                 )
+                total_regions = sum(len(v[0]) for v in phage_cord.values())
+                logger.info(f"found {total_regions} prophage regions")
 
                 from jaeger.postprocess.prophage_boundaries import (
                     refine_prophage_boundaries,
                 )
 
+                # Extract tRNA features from GenBank annotations for
+                # tRNA-aware boundary refinement and evidence reporting.
+                trna_features = None
+                gene_features = None
+                if annotations:
+                    trna_features = {
+                        contig: [
+                            (t["start"], t["end"], t["strand"], t["type"])
+                            for t in ann["trna"]
+                        ]
+                        for contig, ann in annotations.items()
+                    }
+                    # Extract gene features for integrase-aware boundary refinement
+                    gene_features = {
+                        contig: [
+                            (c["start"], c["end"], c.get("product", ""))
+                            for c in ann["cds"]
+                        ]
+                        for contig, ann in annotations.items()
+                    }
+
+                logger.info("refining prophage boundaries")
+                # Extract phage and host scores for boundary refinement
+                phage_scores = {
+                    contig: logits_df[contig][0]["phage"].to_numpy()
+                    for contig in logits_df
+                }
+                host_scores = {
+                    contig: logits_df[contig][0]["bacteria"].to_numpy()
+                    for contig in logits_df
+                }
                 refined_boundaries = refine_prophage_boundaries(
                     prophage_cordinates=phage_cord,
                     fasta_path=input_file_path,
                     fsize=kwargs.get("fsize"),
                     stride=kwargs.get("stride"),
+                    trna_features=trna_features,
+                    gene_features=gene_features,
+                    phage_scores=phage_scores,
+                    host_scores=host_scores,
+                )
+                logger.info("boundary refinement complete")
+
+                # Filter by gene density (prophages often have higher gene density than host)
+                logger.info("filtering by gene density")
+                from jaeger.postprocess.prophage_boundaries import find_genes
+                import pyfastx
+
+                filtered_phage_cord = {}
+                fa = pyfastx.Fasta(str(input_file_path), build_index=False)
+                for record in fa:
+                    header = record[0].strip().replace(",", "___")
+                    if header not in phage_cord:
+                        continue
+
+                    cords, scores = phage_cord[header]
+                    if len(cords) == 0:
+                        filtered_phage_cord[header] = [[], []]
+                        continue
+
+                    sequence = str(record[1])
+                    genes = find_genes(sequence)
+                    contig_length = len(sequence)
+                    host_gene_density = (
+                        len(genes) / contig_length * 1000 if contig_length > 0 else 0
+                    )
+
+                    filtered_cords = []
+                    filtered_scores = []
+                    for (start_idx, end_idx), score in zip(cords, scores):
+                        start = start_idx * (
+                            kwargs.get("stride") or kwargs.get("fsize")
+                        )
+                        end = (end_idx - 1) * (
+                            kwargs.get("stride") or kwargs.get("fsize")
+                        ) + kwargs.get("fsize")
+                        region_genes = [
+                            g for g in genes if g[0] >= start and g[1] <= end
+                        ]
+                        region_length = end - start
+                        region_gene_density = (
+                            len(region_genes) / region_length * 1000
+                            if region_length > 0
+                            else 0
+                        )
+
+                        if region_gene_density >= host_gene_density:
+                            filtered_cords.append([start_idx, end_idx])
+                            filtered_scores.append(score)
+
+                    filtered_phage_cord[header] = [
+                        np.array(filtered_cords) if filtered_cords else [],
+                        np.array(filtered_scores) if filtered_scores else [],
+                    ]
+
+                phage_cord = filtered_phage_cord
+                total_regions = sum(len(v[0]) for v in phage_cord.values())
+                logger.info(
+                    f"after gene density filter: {total_regions} prophage regions"
                 )
 
                 plot_type = kwargs.get("plot_type", "circular")
@@ -427,6 +526,18 @@ def _write_prediction_outputs(
                         phage_cordinates=phage_cord,
                         stride=kwargs.get("stride"),
                     )
+                if kwargs.get("interactive_plot"):
+                    plot_scores_html(
+                        logits_df,
+                        phage_cordinates=phage_cord,
+                        annotations=annotations,
+                        outdir=plots_dir,
+                        infile_base=file_base,
+                        fsize=kwargs.get("fsize"),
+                        stride=kwargs.get("stride"),
+                        fasta_path=input_file_path,
+                    )
+                logger.info("generating prophage report")
                 prophage_report(
                     fsize=kwargs.get("fsize"),
                     filehandle=str(input_file_path),
@@ -434,7 +545,9 @@ def _write_prediction_outputs(
                     outdir=pro_dir,
                     refined_boundaries=refined_boundaries,
                     stride=kwargs.get("stride"),
+                    trna_features=trna_features,
                 )
+                logger.info("prophage report complete")
             else:
                 logger.info("no prophage regions found")
         except Exception as e:
@@ -547,6 +660,20 @@ def run_core(**kwargs):
     input_file = input_file_path.name
     file_base = input_file_path.stem
     # INPUT_FILE_MASKED = input_file_path.with_name(file_base + "_masked" + input_file_path.suffix)
+
+    # GenBank input: convert to a temporary FASTA and keep annotations for
+    # downstream prophage visualisation / tRNA-aware boundary refinement.
+    annotations = None
+    temp_dir = None
+    if input_file_path.suffix.lower() in (".gb", ".gbk"):
+        import tempfile
+        from jaeger.seqops.genbank import genbank_to_fasta_and_annotations
+
+        temp_dir = tempfile.TemporaryDirectory()
+        temp_fasta = Path(temp_dir.name) / f"{file_base}.fasta"
+        annotations = genbank_to_fasta_and_annotations(input_file_path, temp_fasta)
+        input_file_path = temp_fasta
+        input_file = temp_fasta.name
 
     OUTPUT_DIR = Path(kwargs.get("output")) / model_id
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -856,6 +983,9 @@ def run_core(**kwargs):
         term_repeats=term_repeats,
         num=num,
         logger=logger,
+        annotations=annotations,
         **kwargs,
     )
+    if temp_dir is not None:
+        temp_dir.cleanup()
     # INPUT_FILE_MASKED.unlink()

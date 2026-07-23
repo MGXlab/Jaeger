@@ -53,6 +53,7 @@ dependencies = [
     "jinja2 >= 3.1",
     "pydustmasker >= 1.0.3",
     "pyrodigal-gv >= 0.3.0",
+    "biopython >= 1.83",
 ]
 license = {text = "MIT"}
 
