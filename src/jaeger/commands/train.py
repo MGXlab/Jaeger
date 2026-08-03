@@ -303,6 +303,12 @@ def _apply_grouped_batching(
     )
 
 
+def _has_callback(builder, branch: str, callback_name: str) -> bool:
+    """Return True if *callback_name* is configured for *branch*."""
+    cb_list = builder.train_cfg.get("callbacks", {}).get(branch, [])
+    return any(cb.get("name") == callback_name for cb in cb_list)
+
+
 def _build_numpy_split(
     path: str,
     num_classes: int,
@@ -313,6 +319,7 @@ def _build_numpy_split(
     num_replicas: int,
     buffer_size: int | None,
     split: str,
+    shuffle: bool = True,
 ) -> tf.data.Dataset:
     """Build a batched/prefetched NumPy dataset for one split."""
     _crop_sizes, _strides, _overlap = _resolve_numpy_crop_params(
@@ -341,9 +348,10 @@ def _build_numpy_split(
     ds = _data
     if _onehot_buffer is None and not _is_ragged_dataset(_data):
         ds = ds.cache()
-    ds = ds.shuffle(
-        buffer_size=buffer_size if buffer_size != -1 else 100000,
-    )
+    if shuffle:
+        ds = ds.shuffle(
+            buffer_size=buffer_size if buffer_size != -1 else 100000,
+        )
 
     if batching_strategy == "grouped":
         feature_specs = _data.element_spec[0]
@@ -751,13 +759,51 @@ def train_fragment_core(**kwargs):
                     buffer_size=_buffer_size,
                 )
 
-                train_args = {
-                    "validation_data": train_data.get("validation").take(
-                        builder.train_cfg.get("classifier_validation_steps")
-                    ),
-                    "epochs": builder.train_cfg.get("classifier_epochs"),
-                    "callbacks": builder.get_callbacks(branch="classifier"),
-                }
+                has_cm_callback = _has_callback(
+                    builder, "classifier", "ValidationConfusionMatrix"
+                )
+                callback_validation_data = None
+                if has_cm_callback:
+                    val_paths = _train_data.get("validation", {}).get("paths", [])
+                    if val_paths:
+                        callback_validation_data = {
+                            "classifier": _build_numpy_split(
+                                val_paths[0],
+                                num_classes=builder.classifier_out_dim,
+                                string_processor_config=string_processor_config,
+                                batching_cfg=batching_cfg,
+                                batch_size=_resolve_batch_size(
+                                    builder.train_cfg, "classifier"
+                                ),
+                                multi_gpu=multi_gpu,
+                                num_replicas=strategy.num_replicas_in_sync,
+                                buffer_size=_buffer_size,
+                                split="validation",
+                                shuffle=False,
+                            )
+                        }
+
+                callbacks = builder.get_callbacks(
+                    branch="classifier",
+                    validation_data=callback_validation_data,
+                )
+                if has_cm_callback:
+                    # The callback performs the full validation pass and injects
+                    # val_loss/val_accuracy into the logs; skip Keras validation
+                    # to avoid running inference twice.
+                    train_args = {
+                        "validation_data": None,
+                        "epochs": builder.train_cfg.get("classifier_epochs"),
+                        "callbacks": callbacks,
+                    }
+                else:
+                    train_args = {
+                        "validation_data": train_data.get("validation").take(
+                            builder.train_cfg.get("classifier_validation_steps")
+                        ),
+                        "epochs": builder.train_cfg.get("classifier_epochs"),
+                        "callbacks": callbacks,
+                    }
                 if checkpoint:
                     train_args["initial_epoch"] = checkpoint.get("classifier", {}).get(
                         "epoch", 0
@@ -1100,13 +1146,52 @@ def train_fragment_core(**kwargs):
                 if rel_train is None or rel_val is None:
                     logger.warning("Skipping training — reliability data not available")
                 else:
-                    train_args = {
-                        "validation_data": rel_val.take(
-                            builder.train_cfg.get("reliability_validation_steps")
-                        ),
-                        "epochs": builder.train_cfg.get("reliability_epochs"),
-                        "callbacks": builder.get_callbacks(branch="reliability"),
-                    }
+                    has_cm_callback = _has_callback(
+                        builder, "reliability", "ValidationConfusionMatrix"
+                    )
+                    callback_validation_data = None
+                    if has_cm_callback:
+                        rel_val_paths = (
+                            builder._get_reliability_fragment_paths()
+                            .get("validation", {})
+                            .get("paths", [])
+                        )
+                        if rel_val_paths:
+                            callback_validation_data = {
+                                "reliability": _build_numpy_split(
+                                    rel_val_paths[0],
+                                    num_classes=builder.reliability_out_dim,
+                                    string_processor_config=string_processor_config,
+                                    batching_cfg=batching_cfg,
+                                    batch_size=_resolve_batch_size(
+                                        builder.train_cfg, "reliability"
+                                    ),
+                                    multi_gpu=multi_gpu,
+                                    num_replicas=strategy.num_replicas_in_sync,
+                                    buffer_size=_buffer_size,
+                                    split="validation",
+                                    shuffle=False,
+                                )
+                            }
+
+                    callbacks = builder.get_callbacks(
+                        branch="reliability",
+                        validation_data=callback_validation_data,
+                    )
+                    if has_cm_callback:
+                        train_args = {
+                            "validation_data": None,
+                            "epochs": builder.train_cfg.get("reliability_epochs"),
+                            "callbacks": callbacks,
+                        }
+                    else:
+                        train_args = {
+                            "validation_data": rel_val.take(
+                                builder.train_cfg.get("reliability_validation_steps")
+                            ),
+                            "epochs": builder.train_cfg.get("reliability_epochs"),
+                            "callbacks": callbacks,
+                        }
                     if checkpoint:
                         train_args["initial_epoch"] = checkpoint.get(
                             "reliability", {}

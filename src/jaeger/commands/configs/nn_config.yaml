@@ -112,24 +112,27 @@ training:
       -  "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/classifier"
       -  "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/reliability"
     classifier:
+      - name: "TerminateOnNaN"
+      - name: "ValidationConfusionMatrix"
+        params:
+          output_path: "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/classifier/validation_confusion_matrix.json"
       - name: "EarlyStopping"
         params:
-          monitor: "val_classifier_loss"
+          monitor: "val_loss"
           patience: 5
           mode: "min"
           restore_best_weights: true
       - name: "ModelCheckpoint"
         params:
-          filepath:  "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/classifier/epoch:{epoch:02d}-loss:{classifier_loss:.2f}.weights.h5"
-          monitor: "classifier_loss"
+          filepath:  "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/classifier/epoch:{epoch:02d}-loss:{val_loss:.2f}.weights.h5"
+          monitor: "val_loss"
           mode: "min"
           save_weights_only: true
           verbose: 1
           save_best_only: false
-      - name: "TerminateOnNaN"
       - name: "CSVLogger"
         params:
-          filename: "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/classifier/training.log"
+          filename: "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/classifier/training.csv"
           separator: ","
           append: false
         callbacks:
@@ -151,7 +154,7 @@ training:
       - name: "TerminateOnNaN"
       - name: "CSVLogger"
         params:
-          filename: "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/reliability/training.log"
+          filename: "/Users/javis/Documents/Programming/Jaeger/data/experiment_{{ model.experiment }}_{{ model.seed }}/checkpoints/reliability/training.csv"
           separator: ","
           append: false
 

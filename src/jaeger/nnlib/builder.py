@@ -30,6 +30,7 @@ from jaeger.seqops.maps import (
     MURPHY10_ID,
     PC5_ID,
 )
+from jaeger.nnlib.callbacks import SyncTerminateOnNaN, ValidationConfusionMatrix
 from jaeger.nnlib.metrics import (
     BinaryF1Score,
     MacroF1Score,
@@ -1578,10 +1579,18 @@ class DynamicModelBuilder:
         tf.saved_model.save(embedding_model, graph_path)
         logger.info(f"embedding-only computational graph is written to {graph_path}")
 
-    def get_callbacks(self, branch: str = "classifier") -> list[Any]:
+    def get_callbacks(
+        self,
+        branch: str = "classifier",
+        validation_data: dict[str, tf.data.Dataset] | None = None,
+    ) -> list[Any]:
         """Build Keras callback list from config for a given *branch*."""
         cb_list = self.train_cfg.get("callbacks", dict())
         callbacks = []
+        jaeger_callbacks = {
+            "SyncTerminateOnNaN": SyncTerminateOnNaN,
+            "ValidationConfusionMatrix": ValidationConfusionMatrix,
+        }
         for cb in cb_list.get(branch, []):
             name = cb.get("name")
             params = cb.get("params", {})
@@ -1591,6 +1600,14 @@ class DynamicModelBuilder:
                     "training.lr_schedule replaces it (a callback cannot "
                     "reduce a schedule-driven learning rate)."
                 )
+                continue
+            if name in jaeger_callbacks:
+                cb_class = jaeger_callbacks[name]
+                if name == "ValidationConfusionMatrix":
+                    params = self._prepare_validation_confusion_matrix_params(
+                        params, branch, validation_data
+                    )
+                callbacks.append(cb_class(**params))
                 continue
             try:
                 cb_class = getattr(tf.keras.callbacks, name)
@@ -1613,6 +1630,41 @@ class DynamicModelBuilder:
                 )
             )
         return callbacks
+
+    def _class_names_from_label_map(self) -> list[str] | None:
+        """Return ordered class names from ``model.class_label_map`` if present."""
+        class_label_map = self.model_cfg.get("class_label_map")
+        if not class_label_map:
+            return None
+        sorted_items = sorted(
+            class_label_map, key=lambda item: int(item.get("label", 0))
+        )
+        return [
+            item.get("class", str(item.get("label", i)))
+            for i, item in enumerate(sorted_items)
+        ]
+
+    def _prepare_validation_confusion_matrix_params(
+        self,
+        params: dict[str, Any],
+        branch: str,
+        validation_data: dict[str, tf.data.Dataset] | None,
+    ) -> dict[str, Any]:
+        """Merge user-supplied ValidationConfusionMatrix params with builder state."""
+        merged = dict(params)
+        if "validation_data" not in merged and validation_data is not None:
+            merged["validation_data"] = validation_data.get(branch)
+        if "num_classes" not in merged:
+            merged["num_classes"] = (
+                self.classifier_out_dim
+                if branch == "classifier"
+                else self.reliability_out_dim
+            )
+        if "class_names" not in merged:
+            class_names = self._class_names_from_label_map()
+            if class_names is not None:
+                merged["class_names"] = class_names
+        return merged
 
     # ------------------------------------------------------------------
     # Config helpers
