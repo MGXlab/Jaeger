@@ -1,6 +1,7 @@
 import sys
 import time
 import json
+import shutil
 import subprocess
 import tempfile
 import traceback
@@ -107,6 +108,53 @@ def _concatenate_tsvs(tsv_paths: list[Path], output_path: Path) -> None:
                     out.write(line)
 
 
+def _merge_npz_files(npz_paths: list[Path], output_path: Path) -> None:
+    """Concatenate per-chunk embedding/NMD .npz files into one file."""
+    if not npz_paths:
+        return
+    embeddings: list[np.ndarray] = []
+    headers: list[np.ndarray] = []
+    for path in npz_paths:
+        data = np.load(path, allow_pickle=True)
+        embeddings.append(data["embedding"])
+        headers.append(data["headers"])
+        data.close()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(
+        output_path,
+        embedding=np.concatenate(embeddings, axis=0),
+        headers=np.concatenate(headers, axis=0),
+    )
+
+
+def _merge_prophage_dirs(
+    prophage_dirs: list[Path], output_dir: Path, file_base: str, logger: Any
+) -> None:
+    """Merge per-chunk prophage report directories into one output directory."""
+    if not prophage_dirs:
+        return
+    final_dir = output_dir / f"{file_base}_prophages"
+    final_dir.mkdir(parents=True, exist_ok=True)
+    final_plots_dir = final_dir / "plots"
+    final_plots_dir.mkdir(parents=True, exist_ok=True)
+
+    tsv_paths: list[Path] = []
+    for pro_dir in prophage_dirs:
+        tsv_path = pro_dir / "prophages_jaeger.tsv"
+        if tsv_path.exists():
+            tsv_paths.append(tsv_path)
+        plots_dir = pro_dir / "plots"
+        if plots_dir.exists():
+            for plot_file in plots_dir.iterdir():
+                if plot_file.is_file():
+                    shutil.copy2(plot_file, final_plots_dir / plot_file.name)
+
+    if tsv_paths:
+        final_tsv = final_dir / "prophages_jaeger.tsv"
+        _concatenate_tsvs(tsv_paths, final_tsv)
+        logger.info(f"wrote {final_tsv}")
+
+
 def _run_chunked_prediction(
     input_file_path: Path,
     output_dir: Path,
@@ -115,11 +163,16 @@ def _run_chunked_prediction(
     chunk_size: int,
     argv: list[str],
     logger: Any,
+    **kwargs: Any,
 ) -> None:
     """Run `jaeger predict` on chunks of contigs and merge the outputs."""
     logger.info(
         f"Input has {num} entries; processing in chunks of {chunk_size} contigs"
     )
+
+    save_embedding = kwargs.get("save_embedding", False)
+    save_nmd = kwargs.get("save_nmd", False)
+    save_prophage = kwargs.get("prophage", False)
 
     with tempfile.TemporaryDirectory(prefix="jaeger_chunk_") as tmp:
         tmp_dir = Path(tmp)
@@ -127,6 +180,9 @@ def _run_chunked_prediction(
 
         chunk_tsvs: list[Path] = []
         chunk_phage_tsvs: list[Path] = []
+        chunk_embedding_npzs: list[Path] = []
+        chunk_nmd_npzs: list[Path] = []
+        chunk_prophage_dirs: list[Path] = []
 
         for idx, chunk_file in enumerate(chunk_files):
             chunk_out = tmp_dir / f"out_{idx:04d}"
@@ -138,7 +194,8 @@ def _run_chunked_prediction(
                     f"chunk {idx}: expected one model sub-directory in {chunk_out}, "
                     f"found {len(model_dirs)}"
                 )
-            tsv_path = model_dirs[0] / f"{chunk_file.stem}.tsv"
+            model_dir = model_dirs[0]
+            tsv_path = model_dir / f"{chunk_file.stem}.tsv"
             if not tsv_path.exists():
                 raise RuntimeError(f"chunk {idx}: expected TSV not found: {tsv_path}")
             chunk_tsvs.append(tsv_path)
@@ -146,6 +203,21 @@ def _run_chunked_prediction(
             phage_tsv_path = tsv_path.with_name(f"{tsv_path.stem}_phages.tsv")
             if phage_tsv_path.exists():
                 chunk_phage_tsvs.append(phage_tsv_path)
+
+            if save_embedding:
+                embedding_npz = model_dir / f"{chunk_file.stem}_embedding.npz"
+                if embedding_npz.exists():
+                    chunk_embedding_npzs.append(embedding_npz)
+
+            if save_nmd:
+                nmd_npz = model_dir / f"{chunk_file.stem}_nmd.npz"
+                if nmd_npz.exists():
+                    chunk_nmd_npzs.append(nmd_npz)
+
+            if save_prophage:
+                prophage_dir = model_dir / f"{chunk_file.stem}_prophages"
+                if prophage_dir.exists():
+                    chunk_prophage_dirs.append(prophage_dir)
 
             logger.info(f"chunk {idx + 1}/{len(chunk_files)} complete")
 
@@ -156,6 +228,19 @@ def _run_chunked_prediction(
         if chunk_phage_tsvs:
             _concatenate_tsvs(chunk_phage_tsvs, final_phage_tsv)
             logger.info(f"wrote {final_phage_tsv}")
+
+        if save_embedding and chunk_embedding_npzs:
+            final_embedding = output_dir / f"{file_base}_embedding.npz"
+            _merge_npz_files(chunk_embedding_npzs, final_embedding)
+            logger.info(f"wrote {final_embedding}")
+
+        if save_nmd and chunk_nmd_npzs:
+            final_nmd = output_dir / f"{file_base}_nmd.npz"
+            _merge_npz_files(chunk_nmd_npzs, final_nmd)
+            logger.info(f"wrote {final_nmd}")
+
+        if save_prophage and chunk_prophage_dirs:
+            _merge_prophage_dirs(chunk_prophage_dirs, output_dir, file_base, logger)
 
 
 def _run_jaeger_subprocess(
@@ -810,18 +895,6 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
                 "run via the CLI instead of calling run_core directly."
             )
             sys.exit(1)
-        if kwargs.get("prophage"):
-            logger.error(
-                "--chunk-size is currently incompatible with --prophage. "
-                "Disable one of them."
-            )
-            sys.exit(1)
-        if kwargs.get("save_embedding") or kwargs.get("save_nmd"):
-            logger.error(
-                "--chunk-size is currently incompatible with --save-embedding and --save-nmd. "
-                "Disable one of them."
-            )
-            sys.exit(1)
         _run_chunked_prediction(
             input_file_path,
             OUTPUT_DIR,
@@ -830,6 +903,7 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
             chunk_size,
             argv,
             logger,
+            **kwargs,
         )
         logger.info(f"processed {num}/{num} sequences")
         logger.info(f"CPU time(s) : {current_process.cpu_times().user:.2f}")
