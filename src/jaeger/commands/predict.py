@@ -164,8 +164,11 @@ def _run_chunked_prediction(
     argv: list[str],
     logger: Any,
     **kwargs: Any,
-) -> None:
-    """Run `jaeger predict` on chunks of contigs and merge the outputs."""
+) -> int:
+    """Run `jaeger predict` on chunks of contigs and merge the outputs.
+
+    Returns the number of contigs written to the main output TSV.
+    """
     logger.info(
         f"Input has {num} entries; processing in chunks of {chunk_size} contigs"
     )
@@ -241,6 +244,13 @@ def _run_chunked_prediction(
 
         if save_prophage and chunk_prophage_dirs:
             _merge_prophage_dirs(chunk_prophage_dirs, output_dir, file_base, logger)
+
+        # Count rows in the merged main TSV (subtract header) to report the
+        # actual number of processed/written contigs, which may be less than
+        # num due to --min-len or N% filtering.
+        with open(final_tsv) as fh:
+            num_written = sum(1 for _ in fh) - 1
+        return num_written
 
 
 def _run_jaeger_subprocess(
@@ -895,7 +905,7 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
                 "run via the CLI instead of calling run_core directly."
             )
             sys.exit(1)
-        _run_chunked_prediction(
+        num_written = _run_chunked_prediction(
             input_file_path,
             OUTPUT_DIR,
             file_base,
@@ -905,7 +915,7 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
             logger,
             **kwargs,
         )
-        logger.info(f"processed {num}/{num} sequences")
+        logger.info(f"processed {num_written}/{num} sequences")
         logger.info(f"CPU time(s) : {current_process.cpu_times().user:.2f}")
         logger.info(f"wall time(s) : {time.time() - current_process.create_time():.2f}")
         logger.info(
