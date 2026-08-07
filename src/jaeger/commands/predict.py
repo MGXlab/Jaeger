@@ -194,7 +194,7 @@ def _run_jaeger_subprocess(
             modified.append(arg)
             i += 1
 
-    cmd = ["jaeger", "predict", *modified[2:]]  # drop 'jaeger predict' if present
+    cmd = ["jaeger", "predict", *modified[2:], "--no-banner"]
     # Let the child print its normal logs/progress directly to the terminal so
     # per-chunk stats are visible. Errors are still detected by return code.
     result = subprocess.run(cmd)
@@ -779,9 +779,11 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
 
     log_file = Path(f"{file_base}_jaeger.log")
     logger = get_logger(OUTPUT_DIR, log_file, level=kwargs.get("verbose"))
-    logger.info(
-        description(version("jaeger-bio")) + "\n{:-^80}".format("validating parameters")
-    )
+    if not kwargs.get("no_banner"):
+        logger.info(
+            description(version("jaeger-bio"))
+            + "\n{:-^80}".format("validating parameters")
+        )
     logger.debug(info)
     logger.debug(model_info)
     try:

@@ -275,6 +275,12 @@ def health(**kwargs):
     help="Process the input in chunks of N contigs to limit memory (0 = disabled)",
 )
 @click.option(
+    "--no-banner",
+    is_flag=True,
+    hidden=True,
+    help="Suppress the Jaeger banner in logs (used internally for chunk subprocesses)",
+)
+@click.option(
     "--window-scores",
     is_flag=True,
     help="Writes window-wise prediction scores and per-window metadata to a .npz file",
