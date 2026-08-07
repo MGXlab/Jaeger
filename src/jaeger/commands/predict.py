@@ -195,12 +195,11 @@ def _run_jaeger_subprocess(
             i += 1
 
     cmd = ["jaeger", "predict", *modified[2:]]  # drop 'jaeger predict' if present
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Let the child print its normal logs/progress directly to the terminal so
+    # per-chunk stats are visible. Errors are still detected by return code.
+    result = subprocess.run(cmd)
     if result.returncode != 0:
-        raise RuntimeError(
-            f"chunk subprocess failed: {' '.join(cmd)}\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
+        raise RuntimeError(f"chunk subprocess failed: {' '.join(cmd)}")
 
     # Subprocess log file is written by the child logger.
     log_path = chunk_output / f"{chunk_input.stem}_jaeger.log"
@@ -829,6 +828,13 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
             chunk_size,
             argv,
             logger,
+        )
+        logger.info(f"processed {num}/{num} sequences")
+        logger.info(f"CPU time(s) : {current_process.cpu_times().user:.2f}")
+        logger.info(f"wall time(s) : {time.time() - current_process.create_time():.2f}")
+        logger.info(
+            f"memory usage : {current_process.memory_full_info().rss / GB_BYTES:.2f}GB "
+            f"({current_process.memory_percent():.2f}%)"
         )
         if temp_dir is not None:
             temp_dir.cleanup()
