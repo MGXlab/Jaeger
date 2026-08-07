@@ -1,6 +1,8 @@
 import sys
 import time
 import json
+import subprocess
+import tempfile
 import traceback
 from importlib.metadata import version
 from importlib.resources import files
@@ -29,7 +31,6 @@ from jaeger.utils.fs import validate_fasta_entries
 from jaeger.utils.misc import json_to_dict, AvailableModels, get_model_id
 from jaeger.utils.logging import description, get_logger
 
-# from jaeger.utils.tandem import split_fasta_with_pyfastx, run_batch, merge_masked_files
 GB_BYTES = 1024**3
 
 
@@ -61,6 +62,149 @@ def _crop_length_warning(
             f"degrade at a different length; prefer --fsize {trained_nt} for this model."
         )
     return None
+
+
+def _split_fasta(input_path: Path, chunk_size: int, out_dir: Path) -> list[Path]:
+    """Split *input_path* into FASTA files with at most *chunk_size* entries."""
+    import pyfastx
+
+    fa = pyfastx.Fasta(str(input_path), build_index=False)
+    chunk_files: list[Path] = []
+    current_chunk: list[tuple[str, str]] = []
+
+    def _flush() -> None:
+        if not current_chunk:
+            return
+        chunk_path = out_dir / f"chunk_{len(chunk_files):04d}.fna"
+        with open(chunk_path, "w") as fh:
+            for header, seq in current_chunk:
+                fh.write(f">{header}\n{seq}\n")
+        chunk_files.append(chunk_path)
+        current_chunk.clear()
+
+    for record in fa:
+        current_chunk.append((record[0], record[1]))
+        if len(current_chunk) >= chunk_size:
+            _flush()
+    _flush()
+
+    if not chunk_files:
+        raise ValueError(f"no records found in {input_path}")
+
+    return chunk_files
+
+
+def _concatenate_tsvs(tsv_paths: list[Path], output_path: Path) -> None:
+    """Concatenate TSVs, keeping the header from the first file only."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as out:
+        for i, path in enumerate(tsv_paths):
+            with open(path) as inp:
+                header = inp.readline()
+                if i == 0:
+                    out.write(header)
+                for line in inp:
+                    out.write(line)
+
+
+def _run_chunked_prediction(
+    input_file_path: Path,
+    output_dir: Path,
+    file_base: str,
+    num: int,
+    chunk_size: int,
+    argv: list[str],
+    logger: Any,
+) -> None:
+    """Run `jaeger predict` on chunks of contigs and merge the outputs."""
+    logger.info(
+        f"Input has {num} entries; processing in chunks of {chunk_size} contigs"
+    )
+
+    with tempfile.TemporaryDirectory(prefix="jaeger_chunk_") as tmp:
+        tmp_dir = Path(tmp)
+        chunk_files = _split_fasta(input_file_path, chunk_size, tmp_dir)
+
+        chunk_tsvs: list[Path] = []
+        chunk_phage_tsvs: list[Path] = []
+
+        for idx, chunk_file in enumerate(chunk_files):
+            chunk_out = tmp_dir / f"out_{idx:04d}"
+            _run_jaeger_subprocess(argv, chunk_file, chunk_out)
+
+            model_dirs = [d for d in chunk_out.iterdir() if d.is_dir()]
+            if len(model_dirs) != 1:
+                raise RuntimeError(
+                    f"chunk {idx}: expected one model sub-directory in {chunk_out}, "
+                    f"found {len(model_dirs)}"
+                )
+            tsv_path = model_dirs[0] / f"{chunk_file.stem}.tsv"
+            if not tsv_path.exists():
+                raise RuntimeError(f"chunk {idx}: expected TSV not found: {tsv_path}")
+            chunk_tsvs.append(tsv_path)
+
+            phage_tsv_path = tsv_path.with_name(f"{tsv_path.stem}_phages.tsv")
+            if phage_tsv_path.exists():
+                chunk_phage_tsvs.append(phage_tsv_path)
+
+            logger.info(f"chunk {idx + 1}/{len(chunk_files)} complete")
+
+        final_tsv = output_dir / f"{file_base}.tsv"
+        final_phage_tsv = output_dir / f"{file_base}_phages.tsv"
+        _concatenate_tsvs(chunk_tsvs, final_tsv)
+        logger.info(f"wrote {final_tsv}")
+        if chunk_phage_tsvs:
+            _concatenate_tsvs(chunk_phage_tsvs, final_phage_tsv)
+            logger.info(f"wrote {final_phage_tsv}")
+
+
+def _run_jaeger_subprocess(
+    argv: list[str], chunk_input: Path, chunk_output: Path
+) -> Path:
+    """Build and run a `jaeger predict` command for one chunk.
+
+    Returns the path to the chunk's log file.
+    """
+    # argv is the original command line, e.g.:
+    # ['.../jaeger', 'predict', '-i', 'input.fna', '-o', 'out', '--xla', ...]
+    # We replace the input/output values and drop --chunk-size to avoid recursion.
+    base_args: list[str] = []
+    skip_next = False
+    for i, arg in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ("--chunk-size",):
+            skip_next = True
+            continue
+        base_args.append(arg)
+
+    # Replace input/output. Check both short and long forms.
+    modified: list[str] = []
+    i = 0
+    while i < len(base_args):
+        arg = base_args[i]
+        if arg in ("-i", "--input") and i + 1 < len(base_args):
+            modified.extend([arg, str(chunk_input)])
+            i += 2
+        elif arg in ("-o", "--output") and i + 1 < len(base_args):
+            modified.extend([arg, str(chunk_output)])
+            i += 2
+        else:
+            modified.append(arg)
+            i += 1
+
+    cmd = ["jaeger", "predict", *modified[2:]]  # drop 'jaeger predict' if present
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"chunk subprocess failed: {' '.join(cmd)}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+
+    # Subprocess log file is written by the child logger.
+    log_path = chunk_output / f"{chunk_input.stem}_jaeger.log"
+    return log_path
 
 
 def _save_auxiliary_outputs(
@@ -283,9 +427,6 @@ def _write_prediction_outputs(
     """
     from jaeger.postprocess.collect import pred_to_dict, write_output
 
-    if kwargs.get("getalllabels"):
-        pass
-
     # Experimental CRF (Viterbi) window decoding
     crf_switch_cost = None
     if kwargs.get("crf", False):
@@ -380,7 +521,6 @@ def _write_prediction_outputs(
                 logger.info("running prophage segmentation")
                 phage_cord = segment(
                     logits_df,
-                    outdir=plots_dir,
                     cutoff_length=kwargs.get("lc"),
                     sensitivity=kwargs.get("sensitivity"),
                     identifier="phage",
@@ -389,6 +529,7 @@ def _write_prediction_outputs(
                 logger.info(f"found {total_regions} prophage regions")
 
                 from jaeger.postprocess.prophage_boundaries import (
+                    filter_low_gene_density_regions,
                     refine_prophage_boundaries,
                 )
 
@@ -435,63 +576,21 @@ def _write_prediction_outputs(
                 )
                 logger.info("boundary refinement complete")
 
-                # Filter by gene density (prophages often have higher gene density than host)
-                logger.info("filtering by gene density")
-                from jaeger.postprocess.prophage_boundaries import find_genes
-                import pyfastx
-
-                filtered_phage_cord = {}
-                fa = pyfastx.Fasta(str(input_file_path), build_index=False)
-                for record in fa:
-                    header = record[0].strip().replace(",", "___")
-                    if header not in phage_cord:
-                        continue
-
-                    cords, scores = phage_cord[header]
-                    if len(cords) == 0:
-                        filtered_phage_cord[header] = [[], []]
-                        continue
-
-                    sequence = str(record[1])
-                    genes = find_genes(sequence)
-                    contig_length = len(sequence)
-                    host_gene_density = (
-                        len(genes) / contig_length * 1000 if contig_length > 0 else 0
+                # Filter by gene density (prophages often have higher gene
+                # density than host). Only applies to near-complete genomes;
+                # shorter contigs pass through unchanged.
+                if kwargs.get("filter_low_gene_density", False):
+                    logger.info("filtering by gene density")
+                    phage_cord = filter_low_gene_density_regions(
+                        prophage_cordinates=phage_cord,
+                        fasta_path=input_file_path,
+                        fsize=kwargs.get("fsize"),
+                        stride=kwargs.get("stride"),
                     )
-
-                    filtered_cords = []
-                    filtered_scores = []
-                    for (start_idx, end_idx), score in zip(cords, scores):
-                        start = start_idx * (
-                            kwargs.get("stride") or kwargs.get("fsize")
-                        )
-                        end = (end_idx - 1) * (
-                            kwargs.get("stride") or kwargs.get("fsize")
-                        ) + kwargs.get("fsize")
-                        region_genes = [
-                            g for g in genes if g[0] >= start and g[1] <= end
-                        ]
-                        region_length = end - start
-                        region_gene_density = (
-                            len(region_genes) / region_length * 1000
-                            if region_length > 0
-                            else 0
-                        )
-
-                        if region_gene_density >= host_gene_density:
-                            filtered_cords.append([start_idx, end_idx])
-                            filtered_scores.append(score)
-
-                    filtered_phage_cord[header] = [
-                        np.array(filtered_cords) if filtered_cords else [],
-                        np.array(filtered_scores) if filtered_scores else [],
-                    ]
-
-                phage_cord = filtered_phage_cord
-                total_regions = sum(len(v[0]) for v in phage_cord.values())
-                logger.info(
-                    f"after gene density filter: {total_regions} prophage regions"
-                )
+                    total_regions = sum(len(v[0]) for v in phage_cord.values())
+                    logger.info(
+                        f"after gene density filter: {total_regions} prophage regions"
+                    )
 
                 plot_type = kwargs.get("plot_type", "circular")
                 if plot_type in ("circular", "both"):
@@ -503,7 +602,6 @@ def _write_prediction_outputs(
                                 for i, c in enumerate(model.class_map.get("class", []))
                             }
                         },
-                        model=model_name,
                         fsize=kwargs.get("fsize"),
                         infile_base=file_base,
                         outdir=plots_dir,
@@ -519,7 +617,6 @@ def _write_prediction_outputs(
                                 for i, c in enumerate(model.class_map.get("class", []))
                             }
                         },
-                        model=model_name,
                         fsize=kwargs.get("fsize"),
                         infile_base=file_base,
                         outdir=plots_dir,
@@ -546,6 +643,7 @@ def _write_prediction_outputs(
                     refined_boundaries=refined_boundaries,
                     stride=kwargs.get("stride"),
                     trna_features=trna_features,
+                    cutoff_length=kwargs.get("lc"),
                 )
                 logger.info("prophage report complete")
             else:
@@ -598,7 +696,7 @@ def _write_prediction_outputs(
     )
 
 
-def run_core(**kwargs):
+def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
     current_process = psutil.Process()
 
     USER_MODEL_PATH = kwargs.get("model_path")
@@ -703,6 +801,38 @@ def run_core(**kwargs):
             "output file exists. enable --overwrite option to overwrite the output file."
         )
         sys.exit(1)
+
+    if chunk_size > 0 and num > chunk_size:
+        if argv is None:
+            logger.error(
+                "--chunk-size requires the original command-line arguments; "
+                "run via the CLI instead of calling run_core directly."
+            )
+            sys.exit(1)
+        if kwargs.get("prophage"):
+            logger.error(
+                "--chunk-size is currently incompatible with --prophage. "
+                "Disable one of them."
+            )
+            sys.exit(1)
+        if kwargs.get("save_embedding") or kwargs.get("save_nmd"):
+            logger.error(
+                "--chunk-size is currently incompatible with --save-embedding and --save-nmd. "
+                "Disable one of them."
+            )
+            sys.exit(1)
+        _run_chunked_prediction(
+            input_file_path,
+            OUTPUT_DIR,
+            file_base,
+            num,
+            chunk_size,
+            argv,
+            logger,
+        )
+        if temp_dir is not None:
+            temp_dir.cleanup()
+        return
 
     if not model_info["graph"].exists():
         logger.error(f"could not find model graph. please check {model_paths}")

@@ -245,6 +245,11 @@ def health(**kwargs):
     help="Generate interactive HTML genome plots for prophage regions",
 )
 @click.option(
+    "--filter-low-gene-density",
+    is_flag=True,
+    help="Filter out prophage predictions with gene density lower than host (only for complete genomes)",
+)
+@click.option(
     "--rc",
     type=float,
     default=0.1,
@@ -252,9 +257,9 @@ def health(**kwargs):
 )
 @click.option(
     "--pc",
-    type=int,
-    default=3,
-    help="Minimum phage score required to accept predictions",
+    type=float,
+    default=0.5,
+    help="Minimum phage probability required to accept predictions (0-1)",
 )
 @click.option(
     "--batch",
@@ -263,6 +268,12 @@ def health(**kwargs):
     help="Parallel batch size, lower if GPU runs out of memory",
 )
 @click.option("--workers", type=int, default=4, help="Number of threads to use")
+@click.option(
+    "--chunk-size",
+    type=int,
+    default=0,
+    help="Process the input in chunks of N contigs to limit memory (0 = disabled)",
+)
 @click.option(
     "--window-scores",
     is_flag=True,
@@ -405,6 +416,8 @@ def predict(**kwargs):
             err=True,
         )
 
+    chunk_size = kwargs.pop("chunk_size", 0)
+
     if model == "default":
         from jaeger.commands.predict_legacy import run_core
 
@@ -412,7 +425,7 @@ def predict(**kwargs):
     else:
         from jaeger.commands.predict import run_core
 
-        run_core(**kwargs)
+        run_core(chunk_size=chunk_size, argv=sys.argv, **kwargs)
 
 
 @click.command(context_settings={"show_default": True})
@@ -521,6 +534,13 @@ def tune(**kwargs):
     is_flag=True,
     default=False,
     help="Generate reliability training data after classifier training",
+)
+@click.option(
+    "--tmp",
+    type=click.Path(file_okay=False),
+    default=None,
+    help="Fast temporary directory for intermediate files (e.g. local scratch). "
+    "Reliability NPZ files are written here first and then copied to the output path.",
 )
 @click.option(
     "--id_threshold",
