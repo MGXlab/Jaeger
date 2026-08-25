@@ -1,0 +1,489 @@
+model:
+  name: jaeger
+  experiment: cv_fold3_conv_hyena_nuc
+  seed: 24876
+  classifier_out_dim: 6
+  reliability_out_dim: 1
+  base_dir: /home/wijesekary/jaeger/experiments
+  class_label_map:
+  - class: bacteria
+    label: 0
+  - class: phage
+    label: 1
+  - class: eukarya
+    label: 2
+  - class: archaea
+    label: 3
+  - class: plasmid
+    label: 4
+  - class: virus
+    label: 5
+  activation: gelu
+  mode: training
+  embedding:
+    use_embedding_layer: false
+    input_type: nucleotide
+    strands: 2
+    frames: 1
+    length: null
+    input_shape:
+    - 2
+    - null
+    - 4
+    embedding_size: 192
+    embedding_regularizer: l2
+    embedding_regularizer_w: 1e-5
+  string_processor:
+    data_format: numpy
+    seq_onehot: true
+    codon: null
+    codon_id: null
+    crop_size: 2000
+    crop_sizes:
+    - 905
+    - 2000
+    validation_crop_sizes:
+    - 2000
+    crop_mode: range
+    crop_units: nucleotide
+    buffer_size: 50000
+    reshuffle_each_iteration: true
+    mutate: false
+    mutation_rate: 0.05
+    shuffle: false
+    masking: false
+    classifier_labels:
+    - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+  representation_learner:
+    hidden_layers:
+    - name: masked_conv1d
+      config:
+        filters: 32
+        kernel_size: 7
+        strides: 1
+        dilation_rate: 1
+        use_bias: true
+        activation: null
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+    - name: nmd
+    - name: masked_batchnorm
+    - name: activation
+      config:
+        activation: gelu
+    - name: residual_block
+      config:
+        use_1x1conv: false
+        block_size: 1
+        filters: 32
+        kernel_size: 5
+        strides: 2
+        dilation_rate: 1
+        use_bias: true
+        activation: gelu
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+        return_nmd: false
+        norm_type: masked_batchnorm
+    - name: residual_block
+      config:
+        use_1x1conv: false
+        block_size: 1
+        filters: 32
+        kernel_size: 5
+        strides: 1
+        dilation_rate: 2
+        use_bias: true
+        activation: gelu
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+        return_nmd: false
+        norm_type: masked_batchnorm
+    - name: residual_block
+      config:
+        use_1x1conv: true
+        block_size: 1
+        filters: 64
+        kernel_size: 5
+        strides: 2
+        dilation_rate: 1
+        use_bias: true
+        activation: gelu
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+        return_nmd: false
+        norm_type: masked_batchnorm
+    - name: residual_block
+      config:
+        use_1x1conv: false
+        block_size: 1
+        filters: 64
+        kernel_size: 5
+        strides: 1
+        dilation_rate: 3
+        use_bias: true
+        activation: gelu
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+        return_nmd: false
+        norm_type: masked_batchnorm
+    - name: nmd
+    - name: residual_block
+      config:
+        use_1x1conv: true
+        block_size: 1
+        filters: 128
+        kernel_size: 5
+        strides: 2
+        dilation_rate: 1
+        use_bias: true
+        activation: gelu
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+        return_nmd: false
+        norm_type: masked_batchnorm
+    - name: residual_block
+      config:
+        use_1x1conv: false
+        block_size: 1
+        filters: 128
+        kernel_size: 5
+        strides: 1
+        dilation_rate: 5
+        use_bias: true
+        activation: gelu
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+        return_nmd: false
+        norm_type: masked_batchnorm
+    - name: nmd
+    - name: residual_block
+      config:
+        use_1x1conv: true
+        block_size: 1
+        filters: 256
+        kernel_size: 5
+        strides: 2
+        dilation_rate: 1
+        use_bias: true
+        activation: gelu
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1.0e-05
+        return_nmd: false
+        norm_type: masked_batchnorm
+    - name: hyena_block
+      config:
+        dim: 256
+        order: 2
+        filter_hidden: 64
+        filter_layers: 2
+        filter_normalize: true
+        dropout: 0.1
+    - name: nmd
+    pooling: masked_max
+  projection:
+    margin: 0.5
+    scale: 64
+    input_shape: 256
+    hidden_layers:
+    - name: dense
+      config:
+        units: 64
+        activation: gelu
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+    - name: dropout
+      config:
+        rate: 0.1
+    - name: dense
+      config:
+        units: 64
+        activation: gelu
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1e-5
+    - name: dropout
+      config:
+        rate: 0.1
+  classifier:
+    input_shape: 256
+    hidden_layers:
+    - name: dense
+      config:
+        units: 64
+        activation: gelu
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1.0e-05
+    - name: dropout
+      config:
+        rate: 0.1
+    - name: dense
+      config:
+        units: 64
+        activation: gelu
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1.0e-05
+    - name: dropout
+      config:
+        rate: 0.1
+    - name: dense
+      config:
+        units: 6
+        activation: null
+        dtype: float32
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1.0e-05
+        bias_initializer: calculate_from_train_data
+  reliability_model:
+    merge:
+      mode: concat
+      axis: -1
+    input_shape: 480
+    hidden_layers:
+    - name: dropout
+      config:
+        rate: 0.1
+    - name: dense
+      config:
+        units: 32
+        activation: gelu
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1.0e-05
+    - name: dropout
+      config:
+        rate: 0.1
+    - name: dense
+      config:
+        units: 1
+        activation: null
+        dtype: float32
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 1.0e-05
+        bias_initializer: calculate_from_train_data
+training:
+  data_dir: /home/wijesekary/jaeger/data/folds
+  experiment_root: experiments/experiment_{{ model.experiment }}_{{ model.seed }}
+  classifier_dir: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/classifier'
+  reliability_dir: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/reliability'
+  projection_dir: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/projection'
+  classifier_epochs: 10
+  reliability_epochs: 0
+  projection_epochs: 0
+  classifier_train_steps: -1
+  reliability_train_steps: -1
+  classifier_validation_steps: 5000
+  reliability_validation_steps: -1
+  tune_reliability_threshold: true
+  reliability_threshold:
+    metric: f1-id
+    min: 0.0
+    max: 0.95
+    step: 0.05
+  reliability_data_generation:
+    raw_csv_paths:
+      train: '{{ training.data_dir }}/train.csv'
+      val: '{{ training.data_dir }}/val.csv'
+    output_dir: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/reliability'
+    crop_sizes:
+    - 300
+    - 1665
+    max_memory_mb: 12000
+    crop_units: codon
+    synthetic_ood_multiplier: 1.0
+    inference_batch_size: 128
+    perturbations:
+      shuffle:
+        enabled: true
+        mode:
+        - dinuc
+        - random
+      subseq_repeat:
+        enabled: true
+        window_fraction: 0.25
+      tandem_repeat:
+        enabled: true
+        motif_length_range:
+        - 3
+        - 10
+        window_fraction: 0.25
+        num_repeats: 20
+      n_stretch:
+        enabled: true
+        n_fraction_range:
+        - 0.3
+        - 1.0
+        max_stretches: 3
+      mix: true
+  batch_size: 64
+  classifier_batch_size: 64
+  projection_batch_size: 512
+  gradient_accumulation_steps: 4
+  reliability_batch_size: 128
+  optimizer: adamw
+  optimizer_params:
+    learning_rate: 0.0003
+    clipnorm: 1
+  loss_classifier: categorical_crossentropy
+  loss_params_classifier:
+    from_logits: true
+    label_smoothing: 0.1
+  loss_reliability: binary_crossentropy
+  loss_params_reliability:
+    from_logits: true
+  metrics_classifier:
+  - name: categorical_accuracy
+    params: null
+  - name: macro_f1
+    params: null
+  metrics_reliability:
+  - name: binary_accuracy
+    params:
+      threshold: 0
+  - name: auc
+    params: null
+  - name: binary_f1
+    params:
+      threshold: 0
+  callbacks:
+    clean_old: true
+    directories:
+    - '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/classifier'
+    - '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/reliability'
+    - '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/projection'
+    classifier:
+    - name: TerminateOnNaN
+    - name: ValidationConfusionMatrix
+      params:
+        output_path: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/classifier/validation_confusion_matrix.json'
+    - name: EarlyStopping
+      params:
+        monitor: val_loss
+        patience: 20
+        mode: min
+        restore_best_weights: true
+    - name: ModelCheckpoint
+      params:
+        filepath: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/classifier/epoch:{epoch:02d}-loss:{val_loss:.2f}.weights.h5'
+        monitor: val_loss
+        mode: min
+        save_weights_only: true
+        verbose: 1
+        save_best_only: false
+    - name: ReduceLROnPlateau
+      params:
+        monitor: val_loss
+        patience: 5
+        factor: 0.95
+        min_lr: 1.0e-05
+    - name: CSVLogger
+      params:
+        filename: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/classifier/training_history.csv'
+        separator: ','
+        append: true
+    projection:
+    - name: EarlyStopping
+      params:
+        monitor: val_loss
+        patience: 2
+        mode: min
+        restore_best_weights: true
+    - name: ModelCheckpoint
+      params:
+        filepath: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/projection/epoch:{epoch:02d}-loss:{val_loss:.2f}.weights.h5'
+        monitor: val_loss
+        mode: min
+        save_weights_only: true
+        verbose: 1
+        save_best_only: false
+    - name: ReduceLROnPlateau
+      params:
+        monitor: val_loss
+        patience: 5
+        factor: 0.95
+        min_lr: 1.0e-06
+    - name: TerminateOnNaN
+    - name: CSVLogger
+      params:
+        filename: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/projection/training_history.csv'
+        separator: ','
+        append: true
+    reliability:
+    - name: EarlyStopping
+      params:
+        monitor: val_loss
+        patience: 5
+        mode: min
+        restore_best_weights: true
+    - name: ModelCheckpoint
+      params:
+        filepath: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/reliability/epoch:{epoch:02d}-loss:{val_loss:.2f}.weights.h5'
+        monitor: val_loss
+        mode: min
+        save_weights_only: true
+        verbose: 1
+        save_best_only: false
+    - name: ReduceLROnPlateau
+      params:
+        monitor: val_loss
+        patience: 5
+        factor: 0.95
+        min_lr: 1.0e-06
+    - name: TerminateOnNaN
+    - name: CSVLogger
+      params:
+        filename: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/reliability/training_history.csv'
+        separator: ','
+        append: true
+  model_saving:
+    path: '{{ model.base_dir }}/{{ training.experiment_root }}/model'
+    save_weights: true
+    save_exec_graph: true
+  fragment_classifier_data:
+    train:
+    - class:
+      - bacteria
+      - phage
+      - eukarya
+      - archaea
+      - plasmid
+      - virus
+      path:
+      - /home/wijesekary/jaeger/data/folds/fold0_nuc.npz
+      - /home/wijesekary/jaeger/data/folds/fold1_nuc.npz
+      - /home/wijesekary/jaeger/data/folds/fold2_nuc.npz
+      - /home/wijesekary/jaeger/data/folds/fold4_nuc.npz
+      label:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5
+    validation:
+    - class:
+      - bacteria
+      - phage
+      - eukarya
+      - archaea
+      - plasmid
+      - virus
+      path:
+      - /home/wijesekary/jaeger/data/folds/fold3_nuc.npz
+      label:
+      - 0
+      - 1
+      - 2
+      - 3
+      - 4
+      - 5

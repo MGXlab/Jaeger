@@ -1,0 +1,4 @@
+config,experiment,exp_num,task,num_classes,best_val_loss,best_val_acc,best_rel_val_loss,epochs_run,arch_style,embedding_type,embedding_size,pooling,optimizer,learning_rate,batch_size,codon_id,nmd_pattern,hl_res_count
+test57_binary,57_binary,57,binary,2,0.1405850499868393,0.9662711024284363,0.17764481902122498,12,hidden_layers,translated,192,max,sgd,0.001,512,codon_id,last_only,3.0
+test64,64,64,binary,2,0.1974932700395584,0.9421513080596924,0.38594672083854675,23,hidden_layers,translated,192,max,sgd,0.001,512,none,last_only,3.0
+test69,69,69,binary,2,0.27412334084510803,0.9491282105445862,0.17708005011081696,28,hidden_layers,translated,192,max,sgd,0.0001,64,none,last_only,8.0
