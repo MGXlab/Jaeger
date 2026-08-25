@@ -207,6 +207,70 @@ def test_compute_perturbation_counts_splits_across_multiple_shuffle_modes():
     assert all(c > 0 for c in counts)
 
 
+def test_compute_perturbation_counts_shuffle_proportion():
+    records = [(0, "A" * 100)] * 100
+    specs = [
+        {"name": "shuffle"},
+        {"name": "subseq_repeat"},
+        {"name": "tandem_repeat"},
+        {"name": "n_stretch"},
+    ]
+    cfg = {"shuffle_proportion": 0.75}
+    counts = sp._compute_perturbation_counts(records, 1.0, specs, cfg)
+    assert sum(counts) == 100
+    # 75% of 100 is 75; the single rounding remainder goes to the largest category.
+    assert counts[0] in (75, 76)
+    # Remaining ~25 split equally across the three non-shuffle categories.
+    assert counts[1] + counts[2] + counts[3] == 100 - counts[0]
+
+
+def test_compute_perturbation_counts_proportions_dict():
+    records = [(0, "A" * 100)] * 100
+    specs = [
+        {"name": "shuffle"},
+        {"name": "subseq_repeat"},
+        {"name": "tandem_repeat"},
+        {"name": "n_stretch"},
+    ]
+    cfg = {"proportions": {"shuffle": 0.5, "subseq_repeat": 0.3, "tandem_repeat": 0.2}}
+    counts = sp._compute_perturbation_counts(records, 1.0, specs, cfg)
+    assert sum(counts) == 100
+    assert counts[0] == 50
+    assert counts[1] == 30
+    assert counts[2] == 20
+    # Unspecified category gets the normalized remainder (0 here).
+    assert counts[3] == 0
+
+
+def test_normalize_perturbation_cfg_shuffle_before_perturbation():
+    cfg = {
+        "shuffle": True,
+        "shuffle_before_perturbation": True,
+        "subseq_repeat": True,
+        "tandem_repeat": False,
+        "n_stretch": True,
+    }
+    specs = sp._normalize_perturbation_cfg(cfg)
+    by_name = {s["name"]: s for s in specs}
+    assert by_name["shuffle"].get("pre_shuffle", False) is False
+    assert by_name["subseq_repeat"]["pre_shuffle"] is True
+    assert by_name["n_stretch"]["pre_shuffle"] is True
+    assert "tandem_repeat" not in by_name
+
+
+def test_normalize_perturbation_cfg_per_perturbation_shuffle_before():
+    cfg = {
+        "shuffle": True,
+        "shuffle_before_perturbation": True,
+        "subseq_repeat": {"enabled": True, "shuffle_before_perturbation": False},
+        "tandem_repeat": True,
+    }
+    specs = sp._normalize_perturbation_cfg(cfg)
+    by_name = {s["name"]: s for s in specs}
+    assert by_name["subseq_repeat"]["pre_shuffle"] is False
+    assert by_name["tandem_repeat"]["pre_shuffle"] is True
+
+
 def test_generate_synthetic_sequences_uses_shuffle_mode():
     records = [(0, "ATCG" * 10)]
     seqs = list(

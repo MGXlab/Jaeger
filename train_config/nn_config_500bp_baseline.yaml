@@ -1,6 +1,6 @@
 model:
-  name: jaeger_500bp_baseline
-  experiment: 500bp_baseline
+  name: jaeger_500bp_baseline_trans
+  experiment: 500bp_baseline_trans
   seed: 42
   classifier_out_dim: 3
   reliability_out_dim: 0
@@ -23,18 +23,21 @@ model:
     input_shape:
     - 6
     - null
-    embedding_size: 64
+    embedding_size: 128
     embedding_regularizer: l2
-    embedding_regularizer_w: 1.0e-05
+    embedding_regularizer_w: 0.00001
   string_processor:
     # data_format: csv | numpy
     # csv: live preprocessing from CSV (default, backward compatible)
     # numpy: preprocessed NumPy .npz files (fastest, in-memory)
-    data_format: csv
+    data_format: numpy
     seq_onehot: false
     codon: CODON
     codon_id: CODON_ID
-    crop_size: 500
+    overlap: 0.1
+    crop_sizes: [ 200 ]
+    validation_crop_sizes: [ 200 ]
+    validation_overlap: 0.05
     buffer_size: 500000
     shuffle: true
     reshuffle_each_iteration: true
@@ -54,15 +57,50 @@ model:
     hidden_layers:
     - name: masked_conv1d
       config:
-        filters: 32
+        filters: 128
         kernel_size: 7
         strides: 1
         dilation_rate: 1
         use_bias: true
         activation: null
         kernel_regularizer: l2
-        kernel_regularizer_w: 1.0e-05
+        kernel_regularizer_w: 0.00001
+    - name: nmd
     - name: masked_batchnorm
+      config:
+        return_nmd: false
+    - name: activation
+      config:
+        activation: gelu
+    - name: residual_block # block 1
+      config:
+        use_1x1conv: false
+        block_size: 2
+        filters: 128
+        kernel_size: 5
+        dilation_rate: 3
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 0.00001
+    - name: nmd
+    - name: masked_batchnorm
+      config:
+        return_nmd: false
+    - name: activation
+      config:
+        activation: gelu
+    - name: residual_block # block 2
+      config:
+        use_1x1conv: false
+        block_size: 2
+        filters: 128
+        kernel_size: 5
+        dilation_rate: 3
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 0.00001
+    - name: nmd
+    - name: masked_batchnorm # block 3
       config:
         return_nmd: false
     - name: activation
@@ -72,24 +110,26 @@ model:
       config:
         use_1x1conv: false
         block_size: 2
-        filters: 32
-        kernel_size: 3
+        filters: 128
+        kernel_size: 5
+        dilation_rate: 3
         use_bias: true
         kernel_regularizer: l2
-        kernel_regularizer_w: 1.0e-05
+        kernel_regularizer_w: 0.00001
+    - name: nmd
     - name: masked_batchnorm
       config:
         return_nmd: false
     - name: activation
       config:
         activation: gelu
-    pooling: average
+    pooling: max
   classifier:
-    input_shape: 32
+    input_shape: 128
     hidden_layers:
     - name: dropout
       config:
-        rate: 0.3
+        rate: 0.1
     - name: dense
       config:
         units: 3
@@ -97,7 +137,45 @@ model:
         dtype: float32
         use_bias: true
         kernel_regularizer: l2
-        kernel_regularizer_w: 0.01
+        kernel_regularizer_w: 0.00001
+    input_shape: 128
+    hidden_layers:
+    - name: dropout
+      config:
+        rate: 0.1
+    - name: dense
+      config:
+        units: 3
+        activation: null
+        dtype: float32
+        use_bias: true
+        kernel_regularizer: l2
+        kernel_regularizer_w: 0.00001
+  reliability_model:
+    merge:
+      mode: concat
+      axis: -1
+    input_shape: 512
+    hidden_layers:
+    - name: dense
+      config:
+        units: 8
+        activation: gelu
+        use_bias: true
+        kernel_regularizer: "l2" # l2, l1
+        kernel_regularizer_w: 0.00001
+    - name: dropout
+      config:
+        rate: 0.5
+    - name: dense
+      config:
+        units: 1
+        activation: null
+        dtype: float32
+        use_bias: true
+        kernel_regularizer: "l2"
+        kernel_regularizer_w: 0.05
+
 training:
   data_dir: /home/yasas-wijesekara/ssd/Projects/Jaeger_revisions/training/genomad_train_data/jaeger_format
   experiment_root: experiments/experiment_{{ model.experiment }}_{{ model.seed }}
@@ -106,22 +184,22 @@ training:
   classifier_epochs: 5
   reliability_epochs: 0
   projection_epochs: 0
-  classifier_train_steps: 50000
+  classifier_train_steps: -1
   reliability_train_steps: 0
-  classifier_validation_steps: 2500
+  classifier_validation_steps: -1
   reliability_validation_steps: 0
   batch_size: 64
-  optimizer: adam
+  optimizer: adamw
   optimizer_params:
-    learning_rate: 0.001
+    learning_rate: 0.0003
     clipnorm: 5
   loss_classifier: categorical_crossentropy
   loss_params_classifier:
     from_logits: true
   classifier_class_weights:
-    0: 0.6912
-    1: 0.7641
-    2: 4.0898
+    0: 1
+    1: 1
+    2: 1
   loss_reliability: binary_crossentropy
   loss_params_reliability:
     from_logits: true
@@ -155,7 +233,7 @@ training:
         monitor: val_loss
         patience: 2
         factor: 0.5
-        min_lr: 1.0e-05
+        min_lr: 0.00001
     - name: TerminateOnNaN
     - name: CSVLogger
       params:
@@ -173,7 +251,7 @@ training:
       - virus
       - plasmid
       path:
-      - '{{ training.data_dir }}/train_shuffled.csv'
+      - '{{ training.data_dir }}/train_shuffled_600bp_translated.npz'
       label:
       - 0
       - 1
@@ -184,7 +262,7 @@ training:
       - virus
       - plasmid
       path:
-      - '{{ training.data_dir }}/val_shuffled.csv'
+      - '{{ training.data_dir }}/val_shuffled_600bp_translated.npz'
       label:
       - 0
       - 1

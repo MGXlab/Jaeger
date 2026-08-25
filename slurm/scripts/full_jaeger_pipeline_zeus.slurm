@@ -66,6 +66,9 @@ STRIDE="${STRIDE:-1500}"
 FSIZE="${FSIZE:-2000}"
 MIN_LEN="${MIN_LEN:-1500}"
 BATCH="${BATCH:-96}"
+DYNAMIC_STRIDE="${DYNAMIC_STRIDE:-true}"
+DYNAMIC_STRIDE_THRESHOLD="${DYNAMIC_STRIDE_THRESHOLD:-10.0}"
+USE_BEST_RC="${USE_BEST_RC:-true}"
 WRITE_WINDOW_SCORES="${WRITE_WINDOW_SCORES:-false}"
 OVERWRITE="${OVERWRITE:-false}"
 
@@ -126,15 +129,10 @@ run_step() {
   "$@" 2>&1 | tee -a "$PIPELINE_LOG"
 }
 
-# Run a heavy step on an allocated compute node via srun (zeus) or directly (local).
-run_srun_step() {
-  if [[ "$MODE" == "zeus" ]]; then
-    srun bash -lc \
-      "echo \"[\$(date)] Task \$SLURM_PROCID on node \$SLURMD_NODENAME: GPU \$CUDA_VISIBLE_DEVICES, job \$SLURM_JOB_ID\" >&2; $(printf '%q ' "$@")" \
-      2>&1 | tee -a "$PIPELINE_LOG"
-  else
-    run_step "$@"
-  fi
+# The sbatch batch shell already runs on the allocated compute node, so every
+# step inherits the job's allocation (GPU, CPUs) directly — no nested srun.
+log_node_info() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Running on node $(hostname): GPU ${CUDA_VISIBLE_DEVICES:-none}, job ${SLURM_JOB_ID:-local}" >&2
 }
 
 # ============================================================================
@@ -153,10 +151,12 @@ if [[ "$MODE" == "zeus" ]]; then
   command -v apptainer >/dev/null 2>&1 || die "apptainer is required but not installed"
   CONTAINER_BIND="$PROJECT_ROOT/src/jaeger:/usr/local/lib/python3.12/site-packages/jaeger"
   JAEGER_RUN=(apptainer run --bind /mnt/beegfs --bind "$CONTAINER_BIND" --nv "$CONTAINER" jaeger)
+  PY_RUN=(apptainer exec --bind /mnt/beegfs --bind "$CONTAINER_BIND" --nv "$CONTAINER" python3)
 else
   command -v "$JAEGER_BIN" >/dev/null 2>&1 || die "jaeger executable not found: $JAEGER_BIN"
   command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "python not found: $PYTHON_BIN"
   JAEGER_RUN=("$JAEGER_BIN")
+  PY_RUN=("$PYTHON_BIN")
 fi
 
 file_exists "$JAEGER_TRAIN_CONFIG"
@@ -204,9 +204,10 @@ if [[ "$SELF_SUPERVISED_PRETRAINING" == true ]]; then
 fi
 
 log "Training Jaeger model with flags: $TRAIN_FLAGS"
+log_node_info
 
 # shellcheck disable=SC2086
-run_srun_step "${JAEGER_RUN[@]}" train $TRAIN_FLAGS || die "Training failed"
+run_step "${JAEGER_RUN[@]}" train $TRAIN_FLAGS || die "Training failed"
 
 # ============================================================================
 # ---- Extract model and experiment paths from metadata ----
@@ -214,8 +215,8 @@ run_srun_step "${JAEGER_RUN[@]}" train $TRAIN_FLAGS || die "Training failed"
 
 [[ -f "$SINGULARITY_METADATA" ]] || die "Training metadata file was not created: $SINGULARITY_METADATA"
 
-MODEL_PATH=$("$PYTHON_BIN" -c "import json,sys; print(json.load(open(sys.argv[1]))['model_path'])" "$SINGULARITY_METADATA")
-EXPERIMENT_PATH=$("$PYTHON_BIN" -c "import json,sys; print(json.load(open(sys.argv[1]))['experiment_path'])" "$SINGULARITY_METADATA")
+MODEL_PATH=$("${PY_RUN[@]}" -c "import json,sys; print(json.load(open(sys.argv[1]))['model_path'])" "$SINGULARITY_METADATA")
+EXPERIMENT_PATH=$("${PY_RUN[@]}" -c "import json,sys; print(json.load(open(sys.argv[1]))['experiment_path'])" "$SINGULARITY_METADATA")
 
 [[ -n "$MODEL_PATH" && "$MODEL_PATH" != "null" ]] || die "MODEL_PATH is empty"
 [[ -n "$EXPERIMENT_PATH" && "$EXPERIMENT_PATH" != "null" ]] || die "EXPERIMENT_PATH is empty"
@@ -223,19 +224,30 @@ EXPERIMENT_PATH=$("$PYTHON_BIN" -c "import json,sys; print(json.load(open(sys.ar
 log "MODEL_PATH=$MODEL_PATH"
 log "EXPERIMENT_PATH=$EXPERIMENT_PATH"
 
-# Prefer the reliability threshold tuned during training; fall back to BEST_RC.
-THRESHOLD_FILE="$EXPERIMENT_PATH/checkpoints/reliability/reliability_threshold.txt"
-if [[ -f "$THRESHOLD_FILE" ]]; then
-  BEST_RC=$(tr -d '[:space:]' <"$THRESHOLD_FILE")
-  log "Using tuned reliability threshold: $BEST_RC"
+# Resolve the reliability cutoff: when USE_BEST_RC=true, prefer the threshold
+# tuned during training and fall back to BEST_RC; otherwise force 0 so the
+# reliability head does not filter any predictions.
+if [[ "$USE_BEST_RC" == true ]]; then
+  THRESHOLD_FILE="$EXPERIMENT_PATH/checkpoints/reliability/reliability_threshold.txt"
+  if [[ -f "$THRESHOLD_FILE" ]]; then
+    BEST_RC=$(tr -d '[:space:]' <"$THRESHOLD_FILE")
+    log "Using tuned reliability threshold: $BEST_RC"
+  else
+    log "No tuned threshold found at $THRESHOLD_FILE; using BEST_RC=$BEST_RC"
+  fi
 else
-  log "No tuned threshold found at $THRESHOLD_FILE; using BEST_RC=$BEST_RC"
+  BEST_RC=0
+  log "USE_BEST_RC=false; using reliability cutoff 0"
 fi
 
 PREDICTIONS_DIR="$EXPERIMENT_PATH/predictions"
 
 mkdir -p "$PREDICTIONS_DIR"
 mkdir -p "$EXPERIMENT_PATH/metrics"
+
+# ============================================================================
+# ---- Make predictions on realworld data ----
+# ============================================================================
 
 for fasta in "${TEST_FASTAS[@]}"; do
   sample_name=$(basename "$fasta" .fasta)
@@ -257,6 +269,11 @@ for fasta in "${TEST_FASTAS[@]}"; do
     OVERWRITE_FLAG="--overwrite"
   fi
 
+  DYNAMIC_STRIDE_FLAG=""
+  if [[ "$DYNAMIC_STRIDE" == true ]]; then
+    DYNAMIC_STRIDE_FLAG="--dynamic-stride --dynamic-stride-threshold $DYNAMIC_STRIDE_THRESHOLD"
+  fi
+
   # shellcheck disable=SC2086
   run_step "${JAEGER_RUN[@]}" predict \
     --model_path "$MODEL_PATH" \
@@ -268,6 +285,7 @@ for fasta in "${TEST_FASTAS[@]}"; do
     --min-len "$MIN_LEN" \
     --batch "$BATCH" \
     --rc "$BEST_RC" \
+    $DYNAMIC_STRIDE_FLAG \
     $WINDOW_FLAG \
     $OVERWRITE_FLAG \
     || die "Prediction failed for $sample_name"
@@ -288,7 +306,7 @@ PRED_OUTPUT_DIR="${PRED_SUBDIRS[0]}"
 
 log "Calculating real-world metrics from $PRED_OUTPUT_DIR"
 
-run_step "$PYTHON_BIN" "$PROJECT_ROOT/scripts/calculate_metrics_realworld.py" \
+run_step "${PY_RUN[@]}" "$PROJECT_ROOT/scripts/calculate_metrics_realworld.py" \
   --predictions-dir "$PRED_OUTPUT_DIR" \
   --labels-dir "$TEST_LABELS_DIR" \
   --output-dir "$EXPERIMENT_PATH/metrics" \

@@ -77,8 +77,8 @@ def convert_graph_cmd(model: str, output: Path, mode: str, int8: bool, verbose: 
         in standard pip packages). Use NVIDIA NGC containers.
 
     Examples:
-        jaeger utils convert-graph -m default -o ./optimized --mode xla
-        jaeger utils convert-graph -m default -o ./optimized --mode onnx
-        jaeger utils convert-graph -m default -o ./optimized --mode onnx --int8
+        jaeger utils convert-model -m default -o ./optimized --mode xla
+        jaeger utils convert-model -m default -o ./optimized --mode onnx
+        jaeger utils convert-model -m default -o ./optimized --mode onnx --int8
     """
     convert_graph(model, output, mode, verbose, int8=int8)

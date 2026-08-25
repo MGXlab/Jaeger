@@ -310,7 +310,7 @@ def _has_callback(builder, branch: str, callback_name: str) -> bool:
 
 
 def _build_numpy_split(
-    path: str,
+    path: str | list[str],
     num_classes: int,
     string_processor_config: dict[str, Any],
     batching_cfg: dict[str, Any],
@@ -321,7 +321,14 @@ def _build_numpy_split(
     split: str,
     shuffle: bool = True,
 ) -> tf.data.Dataset:
-    """Build a batched/prefetched NumPy dataset for one split."""
+    """Build a batched/prefetched NumPy dataset for one split.
+
+    ``path`` may be a single ``.npz`` path or a list of paths. Multiple
+    archives are concatenated sample-wise before caching/shuffling/batching,
+    so e.g. cross-validation folds can be combined as train/validation splits
+    without materialising merged files.
+    """
+    paths = [path] if isinstance(path, str) else list(path)
     _crop_sizes, _strides, _overlap = _resolve_numpy_crop_params(
         string_processor_config, split
     )
@@ -329,21 +336,27 @@ def _build_numpy_split(
         buffer_size if buffer_size is not None and buffer_size > 0 else None
     )
     batching_strategy = batching_cfg.get("strategy", "padded")
-    _data = _load_numpy_dataset(
-        path,
-        input_type=string_processor_config.get("input_type"),
-        seq_onehot=string_processor_config.get("seq_onehot"),
-        codon_depth=string_processor_config.get("codon_depth"),
-        nucleotide_onehot_map=string_processor_config.get("nucleotide_onehot_map"),
-        num_classes=num_classes,
-        one_hot_labels=True,
-        buffer_size=_onehot_buffer,
-        crop_sizes=_crop_sizes,
-        strides=_strides,
-        overlap=_overlap,
-        pad_to_max=(batching_strategy != "grouped"),
-        crop_mode=string_processor_config.get("crop_mode", "all"),
-    )
+    _datasets = [
+        _load_numpy_dataset(
+            p,
+            input_type=string_processor_config.get("input_type"),
+            seq_onehot=string_processor_config.get("seq_onehot"),
+            codon_depth=string_processor_config.get("codon_depth"),
+            nucleotide_onehot_map=string_processor_config.get("nucleotide_onehot_map"),
+            num_classes=num_classes,
+            one_hot_labels=True,
+            buffer_size=_onehot_buffer,
+            crop_sizes=_crop_sizes,
+            strides=_strides,
+            overlap=_overlap,
+            pad_to_max=(batching_strategy != "grouped"),
+            crop_mode=string_processor_config.get("crop_mode", "all"),
+        )
+        for p in paths
+    ]
+    _data = _datasets[0]
+    for _other in _datasets[1:]:
+        _data = _data.concatenate(_other)
 
     ds = _data
     if _onehot_buffer is None and not _is_ragged_dataset(_data):
@@ -484,13 +497,8 @@ def _build_branch_datasets(
             )
         elif data_format == "numpy":
             logger.info(f"Loading {branch} {split} data from NumPy: {paths}")
-            if len(paths) > 1:
-                logger.warning(
-                    "NumPy format only supports a single .npz file per split; using first: %s",
-                    paths[0],
-                )
             result[split] = _build_numpy_split(
-                paths[0],
+                paths,
                 num_classes=num_classes,
                 string_processor_config=string_processor_config,
                 batching_cfg=batching_cfg,
@@ -998,6 +1006,8 @@ def train_fragment_core(**kwargs):
                 synthetic_ood_multiplier=synthetic_ood_multiplier,
                 generator_cfg=generator_cfg,
                 inference_batch_size=generator_cfg.get("inference_batch_size"),
+                tmp_dir=kwargs.get("tmp"),
+                train_cfg=builder.train_cfg,
             )
             data_format = "numpy"
             logger.info(
@@ -1118,13 +1128,8 @@ def train_fragment_core(**kwargs):
                         )
                     elif data_format == "numpy":
                         logger.info(f"Loading reliability {k} data from NumPy: {paths}")
-                        if len(paths) > 1:
-                            logger.warning(
-                                "NumPy format only supports a single .npz file per split; using first: %s",
-                                paths[0],
-                            )
                         rel_train_data[k] = _build_numpy_split(
-                            paths[0],
+                            paths,
                             num_classes=builder.reliability_out_dim,
                             string_processor_config=string_processor_config,
                             batching_cfg=batching_cfg,
@@ -1226,7 +1231,28 @@ def train_fragment_core(**kwargs):
                         )
 
                     # ---- reliability threshold tuning ----
-                    if builder.train_cfg.get("tune_reliability_threshold", True):
+                    # Optional quality gate: skip tuning when the best
+                    # validation loss exceeds a configured ceiling. For a
+                    # balanced binary val set, ln(2) ~ 0.693 is the loss of
+                    # predicting the class prior — a head above that learns
+                    # nothing usable, so tuning it wastes compute.
+                    _tune_gate = builder.train_cfg.get(
+                        "reliability_tuning_max_val_loss"
+                    )
+                    _rel_val_losses = reliability_history.history.get("val_loss", [])
+                    if (
+                        _tune_gate is not None
+                        and _rel_val_losses
+                        and min(_rel_val_losses) > _tune_gate
+                    ):
+                        logger.warning(
+                            f"Skipping reliability threshold tuning: best val_loss "
+                            f"{min(_rel_val_losses):.4f} exceeds "
+                            f"reliability_tuning_max_val_loss={_tune_gate}. "
+                            "The reliability head did not converge to a usable "
+                            "calibration."
+                        )
+                    elif builder.train_cfg.get("tune_reliability_threshold", True):
                         if reliability_dir is None:
                             logger.warning(
                                 "reliability_dir is not configured; "

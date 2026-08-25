@@ -1,8 +1,3 @@
-import csv
-import random
-import subprocess
-import shutil
-import sys
 import pyfastx
 import numpy as np
 from pathlib import Path
@@ -17,11 +12,8 @@ logger = get_logger(log_file=None, log_path=None, level=3)
 
 
 def mask_core(**kwargs):
-    import numpy as np
-
-    _rng = np.random.default_rng()
-
-    # Pre‐define your alt‐nuc_map once
+    # Pre-define the alt-nucleotide map once (module scope would also work, but
+    # keeping it local avoids polluting the module namespace).
     _ALT = {
         ord("A"): ("T", "G", "C"),
         ord("T"): ("A", "G", "C"),
@@ -34,193 +26,61 @@ def mask_core(**kwargs):
     output_path = kwargs.get("output")
     min_perc = kwargs.get("minperc", 0.0)
     max_perc = kwargs.get("maxperc", 1.0)
-    step = kwargs.get("step", 0.01)  # increment in mutation percentage
+    step = kwargs.get("step", 0.01)  # increment in mutation fraction
     mutate = kwargs.get("mutate", False)  # replace with random nucleotides
+    seed = kwargs.get("seed")
 
-    f = pyfastx.Fasta(input_path, build_index=False)
-
-    # def soft_mutation(seq: str, indices):
-    #     """
-    #     Turn seq[i]→lowercase for each i in indices, but leave other letters untouched.
-    #     Works in‐place on a bytearray.
-    #     """
-    #     ba = bytearray(seq, "ascii")        # O(N) once
-    #     mask = 0x20                         # bit to flip uppercase→lowercase
-    #     for i in indices:
-    #         # only flip if currently uppercase A–Z
-    #         c = ba[i]
-    #         if 0x41 <= c <= 0x5A:           # 'A'..'Z'
-    #             ba[i] = c | mask
-    #             # print(chr(c |  mask))
-    #     return ba.decode("ascii")
+    # Single seeded RNG drives both index selection and nucleotide replacement
+    # so runs are reproducible when --seed is provided.
+    rng = np.random.default_rng(seed)
 
     def hard_mask(seq: str, indices):
-        """
-        Turn seq[i]→N for each i in indices, but leave other letters untouched.
-        Works in‐place on a bytearray.
-        """
-        ba = bytearray(seq, "ascii")  # O(N) once
+        """Turn seq[i] -> N for each i in indices, leaving other letters intact."""
+        ba = bytearray(seq, "ascii")
         for i in indices:
             ba[i] = 0x4E
         return ba.decode("ascii")
 
     def replacement_mutation(seq: str, indices):
-        """
-        For each i in indices, replace seq[i] with one of its 3 alternatives
-        uniformly at random. Other positions remain unchanged.
-        """
-        ba = bytearray(seq, "ascii")  # O(N)
-        choices = _rng.integers(0, 3, size=len(indices))  # vectorized integer sampling
-
+        """Replace seq[i] with one of its 3 alternatives uniformly at random."""
+        ba = bytearray(seq, "ascii")
+        choices = rng.integers(0, 3, size=len(indices))
         for i, choice in zip(indices, choices):
             alts = _ALT.get(ba[i], _DEFAULT_ALTS)
-            # ba[i] = ord(alts[choice])      # if you want to mutate the bytearray
-            # but since alts[...] is a str of length 1:
             ba[i] = ord(alts[choice])
-
         return ba.decode("ascii")
+
+    f = pyfastx.Fasta(input_path, build_index=False)
 
     with open(output_path, "w") as fh:
         for name, seq in track(f, description="Processing..."):
             seq = str(seq)
             seqlen = len(seq)
             current_perc = min_perc
-            used_indices = set()
+            # Shuffle all positions once up front, then consume cumulative
+            # chunks. This is O(N) total instead of rebuilding an "available"
+            # set every iteration (O(N) per step -> quadratic on long contigs).
+            order = rng.permutation(seqlen)
+            cursor = 0
+            num_mutate = int(seqlen * step)
 
             while current_perc <= max_perc:
-                # Write mutated FASTA entry
+                # Write the entry at the current masking level.
                 fh.write(f">{name}_mutperc_{current_perc * 100:.2f}\n")
                 for i in range(0, len(seq), 70):
                     fh.write(seq[i : i + 70] + "\n")
-                # Determine number of new positions to mutate
-                num_mutate = int(seqlen * step)
-                # Choose from unused indices to avoid re-mutating
-                available = list(set(np.arange(seqlen)) - used_indices)
-                if not available:
-                    break
-                new_indices = np.random.choice(
-                    available, min(num_mutate, len(available)), replace=False
-                )
-                used_indices.update(new_indices)
 
-                # Apply mutation
-                if mutate is not True:
-                    seq = hard_mask(seq, new_indices)
-                else:
+                if cursor >= seqlen or num_mutate <= 0:
+                    break
+                new_indices = order[cursor : cursor + num_mutate]
+                cursor += len(new_indices)
+
+                if mutate:
                     seq = replacement_mutation(seq, new_indices)
+                else:
+                    seq = hard_mask(seq, new_indices)
 
                 current_perc += step
-
-
-def read_sequences(
-    input_path: Path, intype: str, seq_col=None, class_col=None, class_id=None
-):
-    """Read sequences from a FASTA or CSV file."""
-    records = []
-    if intype == "FASTA":
-        for name, seq in pyfastx.Fasta(str(input_path), build_index=False):
-            records.append((name, str(seq), class_id))
-    elif intype == "CSV":
-        with open(input_path) as fh:
-            reader = csv.reader(fh)
-            for row in reader:
-                seq = row[seq_col]
-                cls = row[class_col]
-                name = f"seq_{len(records)}"
-                records.append((name, seq, cls))
-    else:
-        raise ValueError(f"Unsupported input type: {intype}")
-    return records
-
-
-def generate_fragments(records, frag_len=2048, overlap=1024):
-    """Generate fragments from sequences."""
-    fragments = []
-    for name, seq, cls in records:
-        seq = str(seq)
-        start = 0
-        frag_id = 0
-        L = len(seq)
-        if L >= frag_len:
-            while start < L:
-                end = min(start + frag_len, L)
-                offset = frag_len - (end - start)
-                start = start if offset == 0 else start - offset
-                frag = seq[start:end]
-                frag_name = (
-                    f"{name}_frag{frag_id}_start{start}_len{len(frag)}_cls={cls}"
-                )
-                fragments.append((frag_name, frag, cls))
-                frag_id += 1
-                if end == L:
-                    break
-                start = end - overlap
-    return fragments
-
-
-def write_fasta(records, output_path):
-    """Write sequences to a FASTA file."""
-    with open(output_path, "w") as fh:
-        for name, seq, _ in records:
-            fh.write(f">{name}\n")
-            for i in range(0, len(seq), 70):
-                fh.write(seq[i : i + 70] + "\n")
-
-
-def run_mmseqs_cluster(frag_fasta, out_prefix, tmpdir, min_id, min_cov):
-    """Run MMseqs2 easy-cluster."""
-    if shutil.which("mmseqs") is None:
-        sys.exit("Error: MMseqs2 not found in PATH.")
-    subprocess.run(
-        [
-            "mmseqs",
-            "easy-cluster",
-            frag_fasta,
-            out_prefix,
-            tmpdir,
-            "--min-seq-id",
-            str(min_id),
-            "-c",
-            str(min_cov),
-        ],
-        check=True,
-    )
-
-
-def split_dataset(records, trainperc, valperc, testperc):
-    """Split records into train, val, and test sets."""
-
-    random.shuffle(records)
-    N = len(records)
-    n_train = int(trainperc * N)
-    n_val = int(valperc * N)
-    train = records[:n_train]
-    val = records[n_train : n_train + n_val]
-    test = records[n_train + n_val :]
-    return train, val, test
-
-
-def write_output(train, val, test, out_prefix, outtype="CSV"):
-    """Write output subsets in FASTA or CSV format."""
-    subsets = {"train": train, "val": val, "test": test}
-    for name, subset in subsets.items():
-        if len(subset) > 0:
-            if outtype == "FASTA":
-                out_file = out_prefix / out_prefix.with_name(
-                    f"{out_prefix.name}_{name}.fasta"
-                )
-                write_fasta(subset, out_file)
-            elif outtype == "CSV":
-                out_file = out_prefix / out_prefix.with_name(
-                    f"{out_prefix.name}_{name}.csv"
-                )
-                with open(out_file, "w", newline="") as fh:
-                    writer = csv.writer(fh)
-                    # writer.writerow(["class", "sequence", "id"])
-                    for seq_id, seq, cls in subset:
-                        writer.writerow([cls, seq, seq_id])
-            else:
-                raise ValueError(f"Unsupported output type: {outtype}")
 
 
 def dataset_core(**kwargs):
@@ -246,10 +106,7 @@ def dataset_core(**kwargs):
 
 
 def convert_core(**kwargs):
-    import pandas as pd
-
-    """
-    Convert between CSV and FASTA using pandas and pyfastx.
+    """Convert between CSV and FASTA using pandas and pyfastx.
 
     Parameters
     ----------
@@ -260,6 +117,8 @@ def convert_core(**kwargs):
     input_type : str
         Type of the input file: 'csv' or 'fasta'.
     """
+    import pandas as pd
+
     input_path = Path(kwargs.get("input"))
     output_path = Path(kwargs.get("output"))
     input_type = kwargs.get("itype")
@@ -269,11 +128,10 @@ def convert_core(**kwargs):
             input_path, usecols=[0, 1, 2], names=["class", "sequence", "id"], dtype=str
         )
         with open(output_path, "w") as fasta_out:
-            for idx, row in df.iterrows():
-                seq_id = row["id"].strip()
-                cls_id = row["class"].strip()
-                seq = row["sequence"].strip()
-                fasta_out.write(f">{seq_id}__class={cls_id}\n{seq}\n")
+            for cls_id, seq, seq_id in zip(df["class"], df["sequence"], df["id"]):
+                fasta_out.write(
+                    f">{seq_id.strip()}__class={cls_id.strip()}\n{seq.strip()}\n"
+                )
         print(f"[✓] Converted CSV to FASTA: {output_path}")
 
     elif input_type == "FASTA":
@@ -281,7 +139,10 @@ def convert_core(**kwargs):
         fasta = pyfastx.Fasta(str(input_path), build_index=False)
         records = []
         for name, seq in fasta:
-            seq_id, cls_id = name.split("__class=")
+            if "__class=" in name:
+                seq_id, cls_id = name.split("__class=", 1)
+            else:
+                seq_id, cls_id = name, "0"
             records.append((cls_id, seq, seq_id))
         df = pd.DataFrame(records, columns=["class", "sequence", "id"])
         df.to_csv(output_path, index=False, header=False)
@@ -298,19 +159,17 @@ from jaeger.utils.stats import welch_t_one_tailed  # noqa: E402
 
 
 def stats_core(**kwargs):
+    """Calculate stats and create plots from jaeger output/s.
+
+    1. percentage of each class
+    2. reliability score distribution
+    3. class score distributions
+    """
     import matplotlib.pyplot as plt
 
     import seaborn as sns
     import pandas as pd
 
-    """
-    Calculate stats and create plots from jaeger output/s
-    
-    1. percentage of each class
-    2. reliability score distribution
-    3. class score distributions
-
-    """
     input_path = Path(kwargs.get("input"))
     output_path = Path(kwargs.get("output"))
     output_path.mkdir(exist_ok=True, parents=True)
@@ -475,7 +334,7 @@ def stats_core(**kwargs):
             )
             ax.set_ylabel("Reliability score")
             ax.set_xlabel("Length range")
-            ax.set_title("Legth-wise (quantile) distribution of reliability scores")
+            ax.set_title("Length-wise (quantile) distribution of reliability scores")
             plt.xticks(rotation=45)
             sns.despine()
             plt.tight_layout()
@@ -483,7 +342,7 @@ def stats_core(**kwargs):
             plt.close()
         except Exception as e:
             logger.warning(e)
-            logger.warning("Legth-wise (quantile) plot was not created")
+            logger.warning("Length-wise (quantile) plot was not created")
 
     # perform welch t-tests to check if there is a statistically significant difference
     # between the top-k classes
@@ -567,10 +426,12 @@ def optimize_data_core(
     max_length: int = 5000,  # deprecated, ignored
     max_memory_mb: int | None = None,
     pad: bool = False,
-    units: str = "nuc",
+    units: str | None = None,
+    crop_units: str | None = None,
     overlap: float | None = None,
     balance_classes: bool = False,
     shuffle_seed: int = 42,
+    target_num_shards: int | None = None,
 ):
     """Convert Jaeger CSV training data to an optimized ``.npz`` format.
 
@@ -617,9 +478,13 @@ def optimize_data_core(
     max_length : int, optional
         Deprecated and ignored. Kept for backward compatibility.
     units : str, optional
-        Units for ``crop_size`` and ``stride``: ``nuc`` (nucleotides) or
-        ``codon`` (codons; crop sizes convert to nucleotides via
-        ``3*codons + 5``; strides scale by 3).
+        Deprecated alias for ``crop_units``. Accepts ``nuc`` (nucleotides) or
+        ``codon``. ``crop_units`` takes precedence when both are given.
+    crop_units : str, optional
+        Units for ``crop_size`` and ``stride``: ``codon`` (default; crop sizes
+        convert to nucleotides via ``3*codons + 5``, strides scale by 3) or
+        ``nucleotide``. When neither this nor ``units`` is given, the legacy
+        ``nuc`` default is preserved for backward compatibility.
     overlap : float | None, optional
         Overlap between crops as a fraction of each crop size (0.0-1.0).
         If provided, per-crop strides are computed from the (unit-converted)
@@ -631,10 +496,22 @@ def optimize_data_core(
         Seed for the within-class shuffle used when ``balance_classes`` is
         enabled (default: 42).
     """
-    if units not in {"nuc", "codon"}:
-        raise ValueError("units must be 'nuc' or 'codon'")
+    # Resolve the crop unit. ``crop_units`` is the canonical flag; the legacy
+    # ``units`` (``nuc``/``codon``) is still accepted for backward compatibility.
+    if crop_units is not None:
+        resolved_units = crop_units.lower()
+        if resolved_units not in {"codon", "nucleotide"}:
+            raise ValueError("crop_units must be 'codon' or 'nucleotide'")
+    elif units is not None:
+        legacy = units.lower()
+        if legacy not in {"nuc", "codon"}:
+            raise ValueError("units must be 'nuc' or 'codon'")
+        resolved_units = "nucleotide" if legacy == "nuc" else "codon"
+    else:
+        # Preserve the historical nucleotide default.
+        resolved_units = "nucleotide"
 
-    if units == "codon":
+    if resolved_units == "codon":
         from jaeger.seqops.crop import codons_to_nucleotides
 
         # Codon crops must land on the mod-2 branch so both frame extractors
@@ -668,4 +545,105 @@ def optimize_data_core(
         pad=pad,
         balance_classes=balance_classes,
         shuffle_seed=shuffle_seed,
+        target_num_shards=target_num_shards,
     )
+
+
+def combine_reliability_data_core(**kwargs):
+    """Combine an ID NPZ and an OOD NPZ into a single reliability NPZ."""
+    from jaeger.dataops.reliability_generator import _combine_npz_files
+
+    id_path = kwargs.get("id_npz")
+    ood_path = kwargs.get("ood_npz")
+    output_path = kwargs.get("output")
+    shuffle_seed = kwargs.get("shuffle_seed")
+    balance_ratio = kwargs.get("balance_ratio")
+
+    _combine_npz_files(
+        id_path,
+        ood_path,
+        output_path,
+        shuffle_seed=shuffle_seed,
+        id_ood_ratio=balance_ratio,
+    )
+    logger.info(f"Wrote combined reliability NPZ to {output_path}")
+
+
+def inspect_npz_core(**kwargs):
+    """Print a human-readable summary of a Jaeger NPZ dataset.
+
+    Handles both sharded (streaming converter with ``_jaeger_manifest``) and
+    non-sharded NPZ files. Reports keys, shapes, dtypes, label distribution,
+    and crop/format metadata without materialising large feature arrays.
+    """
+    import json
+
+    import numpy as np
+
+    path = kwargs.get("input")
+    show_labels = kwargs.get("labels", True)
+
+    with np.load(path, allow_pickle=True) as data:
+        files = data.files
+        is_sharded = "_jaeger_manifest" in files
+
+        print(f"File: {path}")
+        print(f"Sharded: {is_sharded}")
+
+        if is_sharded:
+            manifest = json.loads(str(data["_jaeger_manifest"].item()))
+            num_shards = int(manifest["num_shards"])
+            keys = list(manifest["keys"])
+            print(f"Shards: {num_shards}")
+            print(f"Format: {manifest.get('format')}")
+            print(f"Crop sizes: {manifest.get('crop_sizes')}")
+            print(f"Strides: {manifest.get('strides')}")
+            print(f"Padded: {manifest.get('padded')}")
+            print(f"One-hot: {manifest.get('one_hot')}")
+            print(f"Num classes: {manifest.get('num_classes')}")
+            print(f"Codon map: {manifest.get('codon_map')}")
+            print(f"Nucleotide map: {manifest.get('nucleotide_map')}")
+
+            total = 0
+            label_counts: dict[int, int] = {}
+            feature_shapes: dict[str, tuple] = {}
+            for shard_idx in range(num_shards):
+                labels = data[f"labels_{shard_idx:05d}"]
+                total += len(labels)
+                if show_labels:
+                    vals, counts = np.unique(labels, return_counts=True)
+                    for v, c in zip(vals.tolist(), counts.tolist()):
+                        label_counts[int(v)] = label_counts.get(int(v), 0) + int(c)
+                if shard_idx == 0:
+                    for key in keys:
+                        arr = data[f"{key}_{shard_idx:05d}"]
+                        feature_shapes[key] = (arr.shape, str(arr.dtype))
+            print(f"Total samples: {total}")
+            print("Per-shard-0 array shapes/dtypes:")
+            for key in keys:
+                shape, dtype = feature_shapes[key]
+                print(f"  {key}: shape={shape} dtype={dtype}")
+            if show_labels:
+                print(f"Label distribution: {dict(sorted(label_counts.items()))}")
+        else:
+            print(f"Keys: {files}")
+            total = None
+            for key in files:
+                arr = data[key]
+                if key.startswith("_"):
+                    continue
+                if isinstance(arr, np.ndarray):
+                    print(f"  {key}: shape={arr.shape} dtype={arr.dtype}")
+                if key == "labels":
+                    total = len(arr)
+                    if show_labels:
+                        vals, counts = np.unique(arr, return_counts=True)
+                        dist = dict(
+                            zip(
+                                [int(v) for v in vals.tolist()],
+                                [int(c) for c in counts.tolist()],
+                            )
+                        )
+                        print(f"  Label distribution: {dict(sorted(dist.items()))}")
+            if total is not None:
+                print(f"Total samples: {total}")

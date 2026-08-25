@@ -38,6 +38,7 @@ def _normalize_perturbation_cfg(
 ) -> list[dict[str, Any]]:
     """Convert flexible user config into a normalized list of perturbation specs."""
     specs: list[dict[str, Any]] = []
+    global_pre_shuffle = perturbations_cfg.get("shuffle_before_perturbation", False)
 
     def _is_enabled(value: Any) -> bool:
         if isinstance(value, bool):
@@ -80,6 +81,9 @@ def _normalize_perturbation_cfg(
                 "kwargs": {
                     "window_fraction": subseq_dict.get("window_fraction", 0.25),
                 },
+                "pre_shuffle": subseq_dict.get(
+                    "shuffle_before_perturbation", global_pre_shuffle
+                ),
             }
         )
 
@@ -97,6 +101,9 @@ def _normalize_perturbation_cfg(
                     "window_fraction": tandem_dict.get("window_fraction", 0.25),
                     "num_repeats": tandem_dict.get("num_repeats"),
                 },
+                "pre_shuffle": tandem_dict.get(
+                    "shuffle_before_perturbation", global_pre_shuffle
+                ),
             }
         )
 
@@ -117,6 +124,9 @@ def _normalize_perturbation_cfg(
                     "max_stretches": n_stretch_dict.get("max_stretches", 3),
                     "point_n_share": n_stretch_dict.get("point_n_share", 0.2),
                 },
+                "pre_shuffle": n_stretch_dict.get(
+                    "shuffle_before_perturbation", global_pre_shuffle
+                ),
             }
         )
 
@@ -136,13 +146,31 @@ def _normalize_perturbation_cfg(
     return specs
 
 
+def _resolve_category_proportions(
+    proportions_cfg: dict[str, Any],
+    category_names: list[str],
+) -> dict[str, float]:
+    """Normalize user-provided category proportions to sum to 1.0."""
+    raw = {name: float(proportions_cfg.get(name, 0.0)) for name in category_names}
+    total = sum(raw.values())
+    if total <= 0:
+        return {name: 1.0 / len(category_names) for name in category_names}
+    return {name: v / total for name, v in raw.items()}
+
+
 def _compute_perturbation_counts(
     records: list[tuple[int, str]],
     multiplier: float,
     specs: list[dict[str, Any]],
     perturbations_cfg: dict[str, Any],
 ) -> list[int]:
-    """Return the number of synthetic samples to create for each perturbation spec."""
+    """Return the number of synthetic samples to create for each perturbation spec.
+
+    Explicit ``count`` or ``multiplier`` per perturbation take precedence. The
+    remaining budget is distributed either equally across implicit specs (default,
+    legacy behaviour) or according to category proportions when ``proportions`` or
+    ``shuffle_proportion`` are configured.
+    """
     n = len(records)
     global_count = max(0, int(n * multiplier))
     if not specs:
@@ -170,12 +198,60 @@ def _compute_perturbation_counts(
 
     allocated = sum(counts[i] for i in explicit_indices)
     remaining = max(0, global_count - allocated)
-    per_implicit = remaining // len(implicit_indices)
-    for i in implicit_indices:
-        counts[i] = per_implicit
-    leftover = remaining - sum(counts[i] for i in implicit_indices)
-    for i in range(leftover):
-        counts[implicit_indices[i % len(implicit_indices)]] += 1
+
+    use_category_proportions = (
+        "proportions" in perturbations_cfg or "shuffle_proportion" in perturbations_cfg
+    )
+
+    if use_category_proportions:
+        # Group implicit specs by perturbation category.
+        implicit_categories: dict[str, list[int]] = {}
+        for i in implicit_indices:
+            implicit_categories.setdefault(specs[i]["name"], []).append(i)
+        category_names = list(implicit_categories.keys())
+
+        if "proportions" in perturbations_cfg:
+            proportions = _resolve_category_proportions(
+                perturbations_cfg["proportions"], category_names
+            )
+        else:
+            shuffle_prop = float(perturbations_cfg["shuffle_proportion"])
+            other_names = [name for name in category_names if name != "shuffle"]
+            if other_names:
+                other_prop = (1.0 - shuffle_prop) / len(other_names)
+                proportions = {name: other_prop for name in other_names}
+            else:
+                proportions = {}
+            proportions["shuffle"] = shuffle_prop
+
+        # Allocate remaining budget to categories.
+        category_remaining: dict[str, int] = {}
+        for name in category_names:
+            category_remaining[name] = int(remaining * proportions[name])
+        distrib_remainder = remaining - sum(category_remaining.values())
+        sorted_names = sorted(
+            category_names, key=lambda x: proportions[x], reverse=True
+        )
+        for i in range(distrib_remainder):
+            category_remaining[sorted_names[i % len(sorted_names)]] += 1
+
+        # Split each category's budget equally across its implicit specs.
+        for name, indices in implicit_categories.items():
+            cat_count = category_remaining[name]
+            per_spec = cat_count // len(indices)
+            for i in indices:
+                counts[i] = per_spec
+            leftover = cat_count - sum(counts[i] for i in indices)
+            for i in range(leftover):
+                counts[indices[i % len(indices)]] += 1
+    else:
+        # Legacy equal split across implicit specs.
+        per_implicit = remaining // len(implicit_indices)
+        for i in implicit_indices:
+            counts[i] = per_implicit
+        leftover = remaining - sum(counts[i] for i in implicit_indices)
+        for i in range(leftover):
+            counts[implicit_indices[i % len(implicit_indices)]] += 1
 
     return counts
 
@@ -232,8 +308,11 @@ def _generate_chunk_serial(
     else:
         fn = spec["fn"]
         kwargs = spec["kwargs"]
+        pre_shuffle = spec.get("pre_shuffle", False)
         for i in range(count):
             _, seq = records[i % n_records]
+            if pre_shuffle:
+                seq = apply_shuffle(seq)
             out.append(fn(seq, **kwargs))
     return out
 
@@ -285,6 +364,7 @@ def _run_subprocess_worker(
     crop_size: int | None,
     n_segments: int | None,
     seed: int,
+    pre_shuffle: bool = False,
 ) -> str:
     """Launch a stand-alone subprocess worker and return its output path."""
     cmd = [
@@ -311,6 +391,8 @@ def _run_subprocess_worker(
         cmd.extend(["--crop-size", str(crop_size)])
     if n_segments is not None:
         cmd.extend(["--n-segments", str(n_segments)])
+    if pre_shuffle:
+        cmd.append("--pre-shuffle")
 
     subprocess.run(cmd, check=True, capture_output=True, text=True)
     return output_path
@@ -348,7 +430,15 @@ def generate_synthetic_sequences(
             try:
                 tasks: list[
                     tuple[
-                        str, str, str, dict[str, Any], int, int | None, int | None, int
+                        str,
+                        str,
+                        str,
+                        dict[str, Any],
+                        int,
+                        int | None,
+                        int | None,
+                        int,
+                        bool,
                     ]
                 ] = []
                 task_index = 0
@@ -361,6 +451,7 @@ def generate_synthetic_sequences(
                         {} if spec_name == "mix" else spec["kwargs"]
                     )
                     n_segments = spec.get("n_segments")
+                    pre_shuffle = spec.get("pre_shuffle", False)
                     seed_offset = 0
                     for start in range(0, count, generation_chunk_size):
                         sub_count = min(generation_chunk_size, count - start)
@@ -376,6 +467,7 @@ def generate_synthetic_sequences(
                                 crop_size,
                                 n_segments,
                                 base_seed + seed_offset,
+                                pre_shuffle,
                             )
                         )
                         seed_offset += 1
@@ -418,6 +510,7 @@ def _worker_main(args: argparse.Namespace) -> None:
     spec: dict[str, Any] = {
         "name": args.spec_name,
         "kwargs": json.loads(args.kwargs_json),
+        "pre_shuffle": args.pre_shuffle,
     }
     if args.spec_name == "mix":
         spec["n_segments"] = args.n_segments
@@ -450,6 +543,9 @@ def _main() -> None:
     parser.add_argument("--crop-size", type=int, default=None)
     parser.add_argument("--n-segments", type=int, default=None)
     parser.add_argument("--seed", type=int)
+    parser.add_argument(
+        "--pre-shuffle", action="store_true", help="Shuffle sequence before perturbing."
+    )
     args = parser.parse_args()
 
     if args.worker:

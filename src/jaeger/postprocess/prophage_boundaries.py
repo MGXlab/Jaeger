@@ -292,7 +292,6 @@ def refine_boundary_with_integrase_trna(
     side: str,
     phage_scores: np.ndarray,
     host_scores: np.ndarray,
-    window_size: int = 2000,
     stride: int = 1500,
     max_extension: int = 20000,
 ) -> tuple[int, str | None, str | None, float]:
@@ -316,7 +315,6 @@ def refine_boundary_with_integrase_trna(
         side: ``"left"`` or ``"right"``.
         phage_scores: Array of phage scores for each window.
         host_scores: Array of host scores for each window.
-        window_size: Window size in bp.
         stride: Window stride in bp.
         max_extension: Maximum number of bases the boundary may be moved.
 
@@ -415,7 +413,6 @@ def refine_region_with_integrase_trna(
     trnas: list[tuple[int, int, int, str]],
     phage_scores: np.ndarray,
     host_scores: np.ndarray,
-    window_size: int = 2000,
     stride: int = 1500,
     max_extension: int = 20000,
 ) -> tuple[int, int, str | None, str | None, float]:
@@ -432,7 +429,6 @@ def refine_region_with_integrase_trna(
             "left",
             phage_scores,
             host_scores,
-            window_size,
             stride,
             max_extension,
         )
@@ -445,7 +441,6 @@ def refine_region_with_integrase_trna(
             "right",
             phage_scores,
             host_scores,
-            window_size,
             stride,
             max_extension,
         )
@@ -500,7 +495,7 @@ def refine_prophage_boundaries(
     total_contigs = len(prophage_cordinates)
     processed_contigs = 0
     for record in fa:
-        header = record[0].strip().replace(",", "___")
+        header = record[0].strip().replace(" ", "___").replace(",", "#")
         if header not in prophage_cordinates:
             continue
 
@@ -547,7 +542,6 @@ def refine_prophage_boundaries(
                     trnas,
                     contig_phage_scores,
                     contig_host_scores,
-                    fsize,
                     step,
                     max_extension,
                 )
@@ -561,3 +555,75 @@ def refine_prophage_boundaries(
         refined[header] = contig_refined
 
     return refined
+
+
+def filter_low_gene_density_regions(
+    prophage_cordinates: dict,
+    fasta_path: str | Path,
+    fsize: int,
+    stride: int | None = None,
+    min_genome_length: int = 1_000_000,
+) -> dict:
+    """Drop prophage regions whose gene density is below the host average.
+
+    Prophages tend to have a higher gene density than their host, so regions
+    sparser than the contig-wide average are likely false positives. The
+    filter is only meaningful for (near-)complete genomes, so contigs of
+    ``min_genome_length`` bp or shorter pass through unchanged.
+
+    Args:
+        prophage_cordinates: ``{contig_id: [cords, scores]}`` window-index
+            coordinates as produced by ``segment``.
+        fasta_path: Input FASTA used for gene prediction.
+        fsize: Fragment / window size in bp.
+        stride: Sliding-window stride in bp (default: ``fsize``).
+        min_genome_length: Minimum contig length for the filter to apply.
+
+    Returns:
+        A new ``prophage_cordinates`` dict with low-density regions removed.
+    """
+    step = stride or fsize
+    filtered_phage_cord: dict[str, list] = {}
+
+    fa = pyfastx.Fasta(str(fasta_path), build_index=False)
+    for record in fa:
+        header = record[0].strip().replace(" ", "___").replace(",", "#")
+        if header not in prophage_cordinates:
+            continue
+
+        cords, scores = prophage_cordinates[header]
+        if len(cords) == 0:
+            filtered_phage_cord[header] = [[], []]
+            continue
+
+        sequence = str(record[1])
+        contig_length = len(sequence)
+        if contig_length <= min_genome_length:
+            filtered_phage_cord[header] = [cords, scores]
+            continue
+
+        genes = find_genes(sequence)
+        host_gene_density = len(genes) / contig_length * 1000
+
+        filtered_cords = []
+        filtered_scores = []
+        for (start_idx, end_idx), score in zip(cords, scores):
+            # region spans [first window start, last window end]
+            start = start_idx * step
+            end = (end_idx - 1) * step + fsize
+            region_genes = [g for g in genes if g[0] >= start and g[1] <= end]
+            region_length = end - start
+            region_gene_density = (
+                len(region_genes) / region_length * 1000 if region_length > 0 else 0
+            )
+
+            if region_gene_density >= host_gene_density:
+                filtered_cords.append([start_idx, end_idx])
+                filtered_scores.append(score)
+
+        filtered_phage_cord[header] = [
+            np.array(filtered_cords) if filtered_cords else [],
+            np.array(filtered_scores) if filtered_scores else [],
+        ]
+
+    return filtered_phage_cord

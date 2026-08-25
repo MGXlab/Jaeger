@@ -13,6 +13,7 @@ from jaeger.nnlib.v2.layers import (
     HyenaFilter,
     HyenaOperator,
     causal_fft_convolve,
+    fft_convolve,
 )
 from jaeger.utils.misc import load_model_config
 
@@ -333,3 +334,75 @@ def test_builder_hyena_block_regularizer_from_yaml(tmp_path):
         training=False,
     )
     assert len(hyena.losses) > 0
+
+
+def test_fft_convolve_bidirectional_shape():
+    u = tf.random.normal((2, 4, 16))  # (batch, dim, L)
+    h = tf.random.normal((4, 16))  # (dim, L)
+    y = fft_convolve(u, h, bidirectional=True)
+    assert y.shape.as_list() == [2, 4, 16]
+
+
+def test_fft_convolve_bidirectional_preserves_dtype():
+    for dtype in (tf.float16, tf.bfloat16, tf.float32, tf.float64):
+        u = tf.cast(tf.random.normal((2, 4, 16)), dtype)
+        h = tf.random.normal((4, 16))
+        y = fft_convolve(u, h, bidirectional=True)
+        assert y.dtype == dtype
+
+
+def test_fft_convolve_bidirectional_differs_from_causal():
+    """HyenaDNA-style bidirectional padding must change the output."""
+    L = 16
+    u = tf.cast(tf.range(L), tf.float32)[None, None, :]
+    h = tf.ones((1, L)) / tf.cast(L, tf.float32)
+    y_causal = fft_convolve(u, h, bidirectional=False)
+    y_bidirectional = fft_convolve(u, h, bidirectional=True)
+    # The two modes should not be equal on this non-symmetric input.
+    assert not np.allclose(y_causal.numpy(), y_bidirectional.numpy(), atol=1e-5)
+
+
+def test_hyena_operator_bidirectional_shape():
+    layer = HyenaOperator(dim=8, seq_len=32, order=2, bidirectional=True)
+    x = tf.random.normal((2, 32, 8))  # (batch, length, dim)
+    y = layer(x)
+    assert y.shape.as_list() == [2, 32, 8]
+
+
+def test_hyena_block_bidirectional_shape():
+    layer = HyenaBlock(dim=8, seq_len=32, order=2, bidirectional=True)
+    x = tf.random.normal((2, 6, 32, 8))  # (batch, strands, length, dim)
+    y = layer(x)
+    assert y.shape.as_list() == [2, 6, 32, 8]
+
+
+def test_hyena_block_bidirectional_dynamic_length():
+    layer = HyenaBlock(dim=8, seq_len=None, order=2, bidirectional=True)
+    x = tf.random.normal((2, 6, 24, 8))
+    y = layer(x)
+    assert y.shape.as_list() == [2, 6, 24, 8]
+
+
+def test_hyena_block_bidirectional_serialization_roundtrip():
+    block = HyenaBlock(dim=8, seq_len=16, order=2, bidirectional=True)
+    x = tf.random.normal((2, 6, 16, 8))
+    block(x)
+    weights = block.get_weights()
+
+    restored = HyenaBlock.from_config(block.get_config())
+    restored(x)
+    restored.set_weights(weights)
+    np.testing.assert_allclose(
+        block(x, training=False).numpy(),
+        restored(x, training=False).numpy(),
+        atol=1e-5,
+    )
+
+
+def test_hyena_block_bidirectional_respects_mask():
+    layer = HyenaBlock(dim=8, seq_len=16, order=2, bidirectional=True)
+    x = tf.random.normal((1, 1, 16, 8))
+    # mask out the second half
+    mask = tf.concat([tf.ones((1, 1, 8)), tf.zeros((1, 1, 8))], axis=-1)
+    out = layer(x, mask=mask)
+    np.testing.assert_allclose(out[0, 0, 8:].numpy(), np.zeros((8, 8)), atol=1e-5)

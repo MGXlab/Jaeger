@@ -21,7 +21,7 @@ model:
     input_type: nucleotide
     strands: 2
     # frames is ignored for nucleotide input (only relevant for translated input)
-    frames: 6
+    frames: null
     length: null
     input_shape:
     - 2
@@ -34,10 +34,13 @@ model:
     # numpy: preprocessed NumPy .npz files (fastest, in-memory)
     data_format: numpy
     seq_onehot: true
-    codon: CODON
-    codon_id: CODON_ID
-    crop_size: 500
-    buffer_size: 500000
+    nucleotide_onehot_map:
+      A: [ 1.0, 0.0, 0.0, 0.0 ]
+      G: [ 0.0, 1.0, 0.0, 0.0 ]
+      T: [ 0.0, 0.0, 1.0, 0.0 ]
+      C: [ 0.0, 0.0, 0.0, 1.0 ]
+      N: [ 0.0, 0.0, 0.0, 0.0 ]
+    buffer_size: 500
     shuffle: true
     reshuffle_each_iteration: true
     mutate: false
@@ -57,7 +60,7 @@ model:
       hidden_layers:
       - name: conv1d
         config:
-          filters: 500
+          filters: 1000
           kernel_size: 10
       - name: relu
       pooling: max1d
@@ -66,10 +69,10 @@ model:
       hidden_layers:
       - name: dropout
         config:
-          rate: 0.5
+          rate: 0.1
       - name: dense
         config:
-          units: 500
+          units: 1000
       - name: relu
       - name: dropout
         config:
@@ -91,20 +94,20 @@ training:
   projection_epochs: 0
   classifier_train_steps: 50000
   reliability_train_steps: 0
-  classifier_validation_steps: 2500
+  classifier_validation_steps: -1
   reliability_validation_steps: 0
-  batch_size: 32
-  optimizer: adam
+  batch_size: 64
+  optimizer: adamw
   optimizer_params:
-    learning_rate: 0.001
+    learning_rate: 0.0003
     clipnorm: 5
   loss_classifier: categorical_crossentropy
   loss_params_classifier:
     from_logits: true
   classifier_class_weights:
-    0: 0.6912
-    1: 0.7641
-    2: 4.0898
+    0: 1
+    1: 1
+    2: 1
   loss_reliability: binary_crossentropy
   loss_params_reliability:
     from_logits: true
@@ -138,7 +141,7 @@ training:
         monitor: val_loss
         patience: 2
         factor: 0.5
-        min_lr: 1.0e-05
+        min_lr: 0.00001
     - name: TerminateOnNaN
     - name: CSVLogger
       params:
@@ -156,7 +159,7 @@ training:
       - virus
       - plasmid
       path:
-      - '{{ training.data_dir }}/train_shuffled.npz'
+      - '{{ training.data_dir }}/train_shuffled_nuc.npz'
       label:
       - 0
       - 1
@@ -167,7 +170,7 @@ training:
       - virus
       - plasmid
       path:
-      - '{{ training.data_dir }}/val_shuffled.npz'
+      - '{{ training.data_dir }}/val_shuffled_nuc.npz'
       label:
       - 0
       - 1

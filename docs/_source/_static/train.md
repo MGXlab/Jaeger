@@ -35,7 +35,7 @@ All three can be trained jointly or independently.
 ```
 1. Prepare FASTA files per class
         ↓
-2. Generate fragments (jaeger utils dataset / fragment)
+2. Generate fragments (jaeger utils build-dataset / fragment)
         ↓
 3. Convert to CSV format (jaeger utils convert)
         ↓
@@ -66,11 +66,11 @@ data/
 
 ### Step 2: Generate training fragments
 
-Use `jaeger utils dataset` to create non-redundant fragment databases:
+Use `jaeger utils build-dataset` to create non-redundant fragment databases:
 
 ```bash
 # Fragment bacteria genomes into 2048 bp pieces with 60% identity filtering
-jaeger utils dataset \
+jaeger utils build-dataset \
   -i bacteria.fasta \
   -o bacteria_fragments.csv \
   --itype fasta \
@@ -102,7 +102,7 @@ Parameters explained:
 For more realistic training data, simulate variable-length fragments:
 
 ```bash
-jaeger utils fragment \
+jaeger utils sample-fragments \
   -i phage.fasta \
   -o phage_fragments.fasta \
   --minlen 1000 \
@@ -112,7 +112,7 @@ jaeger utils fragment \
 
 Then convert to CSV:
 ```bash
-jaeger utils convert \
+jaeger utils convert-sequences \
   -i phage_fragments.fasta \
   -o phage_fragments.csv \
   --itype fasta
@@ -123,7 +123,7 @@ jaeger utils convert \
 The reliability head needs out-of-distribution examples. Use shuffled sequences:
 
 ```bash
-jaeger utils ood-data \
+jaeger utils generate-ood \
   -i combined_train.csv \
   -o ood_train.csv \
   --itype csv \
@@ -352,7 +352,7 @@ jaeger register-models --path /path/to/my_model
 Gradually mask random positions to improve robustness:
 
 ```bash
-jaeger utils mask \
+jaeger utils mask-sequences \
   -i train.fasta \
   -o train_masked.fasta \
   --minperc 0.0 \
@@ -365,7 +365,7 @@ jaeger utils mask \
 Introduce random mutations instead of masking:
 
 ```bash
-jaeger utils mask \
+jaeger utils mask-sequences \
   -i train.fasta \
   -o train_mutated.fasta \
   --mutate \

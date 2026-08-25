@@ -35,6 +35,7 @@ dependencies = [
     "keras >= 3.12.0",
     "kneed >= 0.8.5",
     "matplotlib >= 3.7",
+    "numba >= 0.60",
     "numpy >= 1.24",
     "pandas >= 2.2.3",
     "polars >= 1.2.6",

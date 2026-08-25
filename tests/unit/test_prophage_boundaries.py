@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from jaeger.postprocess.prophage_boundaries import (
+    filter_low_gene_density_regions,
     find_genes,
     refine_boundary,
     refine_prophage_boundaries,
@@ -154,3 +155,77 @@ def test_prophage_report_skips_degenerate_region(tmp_path: Path):
     assert len(df) == 1
     assert df["raw_start"].iloc[0] == 0
     assert df["raw_end"].iloc[0] == 1
+
+
+def _make_orf_zone_sequence() -> str:
+    """ORF-rich zone followed by a gene-free desert (``CTAG`` repeats carry
+    stop codons in every frame on both strands, so no ORFs are predicted)."""
+    return _make_orf_sequence(num_codons=100) * 5 + "CTAG" * 1500
+
+
+def test_filter_low_gene_density_drops_sparse_regions(tmp_path: Path):
+    seq = _make_orf_zone_sequence()
+    fasta = tmp_path / "test.fa"
+    fasta.write_text(f">contig1\n{seq}\n")
+
+    # region A covers the ORF zone [0, 2000), region B the desert [5000, 7000)
+    prophage_cordinates = {
+        "contig1": [np.array([[0, 4], [10, 14]]), np.array([1.0, 2.0])]
+    }
+    filtered = filter_low_gene_density_regions(
+        prophage_cordinates=prophage_cordinates,
+        fasta_path=fasta,
+        fsize=500,
+        stride=500,
+        min_genome_length=0,
+    )
+
+    cords, scores = filtered["contig1"]
+    assert len(cords) == 1
+    # the kept region must be the one spanning the ORF zone
+    assert [int(cords[0][0]), int(cords[0][1])] == [0, 4]
+    assert scores[0] == pytest.approx(1.0)
+
+
+def test_filter_low_gene_density_skips_short_contigs(tmp_path: Path):
+    seq = _make_orf_zone_sequence()
+    fasta = tmp_path / "test.fa"
+    fasta.write_text(f">contig1\n{seq}\n")
+
+    prophage_cordinates = {
+        "contig1": [np.array([[0, 4], [10, 14]]), np.array([1.0, 2.0])]
+    }
+    filtered = filter_low_gene_density_regions(
+        prophage_cordinates=prophage_cordinates,
+        fasta_path=fasta,
+        fsize=500,
+        stride=500,
+        # default 1 Mbp threshold: short contigs pass through unchanged
+    )
+
+    cords, scores = filtered["contig1"]
+    assert len(cords) == 2
+    assert len(scores) == 2
+
+
+def test_filter_low_gene_density_preserves_empty_and_unmatched(tmp_path: Path):
+    seq = _make_orf_zone_sequence()
+    fasta = tmp_path / "test.fa"
+    fasta.write_text(f">contig1\n{seq}\n>contig2\n{seq}\n")
+
+    prophage_cordinates = {
+        "contig1": [np.array([]), np.array([])],
+        # contig3 is absent from the FASTA and must not appear in the output
+        "contig3": [np.array([[0, 4]]), np.array([1.0])],
+    }
+    filtered = filter_low_gene_density_regions(
+        prophage_cordinates=prophage_cordinates,
+        fasta_path=fasta,
+        fsize=500,
+        stride=500,
+        min_genome_length=0,
+    )
+
+    assert filtered["contig1"] == [[], []]
+    assert "contig2" not in filtered  # no prophage coordinates for it
+    assert "contig3" not in filtered

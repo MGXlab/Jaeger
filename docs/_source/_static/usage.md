@@ -279,13 +279,13 @@ Options:
 
 | Subcommand | Purpose |
 |------------|---------|
-| `jaeger utils dataset` | Generate non-redundant fragment databases for training |
-| `jaeger utils fragment` | Simulate metagenome assemblies from genomes |
-| `jaeger utils convert` | Convert between CSV and FASTA formats |
-| `jaeger utils mask` | Mask or mutate positions in FASTA files |
-| `jaeger utils ood-data` | Generate out-of-distribution (shuffled) sequences |
+| `jaeger utils build-dataset` | Generate non-redundant fragment databases for training |
+| `jaeger utils sample-fragments` | Simulate metagenome assemblies from genomes |
+| `jaeger utils convert-sequences` | Convert between CSV and FASTA formats |
+| `jaeger utils mask-sequences` | Mask or mutate positions in FASTA files |
+| `jaeger utils generate-ood` | Generate out-of-distribution (shuffled) sequences |
 | `jaeger utils combine-models` | Combine multiple models into an ensemble |
-| `jaeger utils stats` | Calculate statistics from Jaeger output |
+| `jaeger utils summarize-predictions` | Calculate statistics from Jaeger output |
 
 ---
 

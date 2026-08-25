@@ -133,6 +133,7 @@ def test_write_prediction_outputs_writes_both_contigs(
     y_pred = {
         "prediction": np.zeros((2, 6), dtype=np.float32),
         "meta_0": np.array(["long_contig", "short_contig"], dtype=object),
+        "meta_1": np.array([0, 0], dtype=np.int32),  # window start index
         "meta_2": np.array([1, 1], dtype=np.int32),
         "meta_4": np.array([2500, 1800], dtype=np.int32),
         "meta_5": np.array([0.25, 0.25], dtype=np.float32),
@@ -165,35 +166,3 @@ def test_write_prediction_outputs_writes_both_contigs(
     assert "data" in written
     assert set(written["data"]["headers"]) == {"long_contig", "short_contig"}
     assert written["kwargs"]["output_table_path"] == tmp_path / "out.tsv"
-
-
-def test_concat_predictions_concatenates_matching_keys() -> None:
-    from jaeger.commands.predict import _concat_predictions
-
-    a = {"prediction": np.zeros((2, 3)), "meta_0": np.array(["c1", "c2"])}
-    b = {"prediction": np.ones((1, 3)), "meta_0": np.array(["c3"])}
-    out = _concat_predictions(a, b)
-    assert out["prediction"].shape == (3, 3)
-    assert out["meta_0"].tolist() == ["c1", "c2", "c3"]
-
-
-def test_concat_predictions_empty_second_pass_returns_first() -> None:
-    # Two-pass inference where no contigs fall in the short length range:
-    # the second pass returns an empty dict and must not crash the merge.
-    from jaeger.commands.predict import _concat_predictions
-
-    a = {"prediction": np.zeros((2, 3)), "meta_0": np.array(["c1", "c2"])}
-    out = _concat_predictions(a, {})
-    assert out["prediction"].shape == (2, 3)
-    assert out["meta_0"].tolist() == ["c1", "c2"]
-
-
-def test_concat_predictions_empty_first_pass_returns_second() -> None:
-    # All contigs in the short length range: first pass is empty and the
-    # second pass predictions must survive (not be replaced by {}).
-    from jaeger.commands.predict import _concat_predictions
-
-    b = {"prediction": np.ones((1, 3)), "meta_0": np.array(["c3"])}
-    out = _concat_predictions({}, b)
-    assert out["prediction"].shape == (1, 3)
-    assert out["meta_0"].tolist() == ["c3"]

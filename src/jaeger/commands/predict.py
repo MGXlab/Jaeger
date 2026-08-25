@@ -394,33 +394,6 @@ def _build_refined_contig_df(
     )
 
 
-def _make_padded_batch_specs(
-    string_processor_config: dict,
-) -> tuple[tuple, tuple]:
-    """Return (padded_shapes, padding_values) for process_string_inference output."""
-    input_type = string_processor_config.get("input_type")
-    codon_depth = string_processor_config.get("codon_depth")
-    padded_features: dict[str, list[int | None]] = {}
-    padding_features: dict[str, float] = {}
-
-    seq_onehot = string_processor_config.get("seq_onehot", True)
-    if input_type in ("translated", "both"):
-        padded_features["translated"] = (
-            [6, None, codon_depth] if seq_onehot else [6, None]
-        )
-        padding_features["translated"] = 0.0
-    if input_type in ("nucleotide", "both"):
-        padded_features["nucleotide"] = [2, None, 4]
-        padding_features["nucleotide"] = 0.0
-
-    # Ten trailing metadata strings from process_string_inference.
-    metadata_shape = ()
-    metadata_pad = ""
-    padded_shapes = (padded_features, *([metadata_shape] * 10))
-    padding_values = (padding_features, *([metadata_pad] * 10))
-    return padded_shapes, padding_values
-
-
 def _build_prediction_dataset(
     input_file_path: Path,
     num: int,
@@ -432,7 +405,6 @@ def _build_prediction_dataset(
     max_len: int | None,
     dynamic_stride: bool,
     dynamic_stride_threshold: float,
-    use_padded_batch: bool,
     dustmask: bool = True,
 ) -> tf.data.Dataset:
     """Build a tf.data dataset for one prediction pass."""
@@ -471,29 +443,7 @@ def _build_prediction_dataset(
         num_parallel_calls=tf.data.AUTOTUNE,
     )
 
-    if use_padded_batch:
-        padded_shapes, padding_values = _make_padded_batch_specs(
-            string_processor_config
-        )
-        return mapped.padded_batch(
-            batch,
-            padded_shapes=padded_shapes,
-            padding_values=padding_values,
-        ).prefetch(25)
     return mapped.batch(batch, num_parallel_calls=tf.data.AUTOTUNE).prefetch(25)
-
-
-def _concat_predictions(a: dict, b: dict) -> dict:
-    """Concatenate two model prediction dicts along the batch axis.
-
-    In two-pass inference either pass may match no contigs and return an
-    empty dict; the other pass's predictions are then returned as-is.
-    """
-    if not a:
-        return b
-    if not b:
-        return a
-    return {k: np.concatenate([a[k], b[k]], axis=0) for k in a}
 
 
 def _write_prediction_outputs(
@@ -1048,7 +998,7 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
         if not tflite_path.exists():
             logger.error(
                 f"Quantized model not found at {tflite_path}. "
-                f"Run 'jaeger utils quantize -m {model_name} -o {graph_dir.parent} --mode {quantized_mode}' first."
+                f"Run 'jaeger utils convert-model -m {model_name} -o {graph_dir.parent} --mode tflite --quantize {quantized_mode}' first."
             )
             sys.exit(1)
 
@@ -1065,7 +1015,7 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
             if not onnx_path.exists():
                 logger.error(
                     f"INT8 ONNX model not found at {onnx_path}. "
-                    f"Run 'jaeger utils convert-graph -m {model_name} -o {graph_dir.parent} --mode onnx --int8' first."
+                    f"Run 'jaeger utils convert-model -m {model_name} -o {graph_dir.parent} --mode onnx --int8' first."
                 )
                 sys.exit(1)
             logger.info(f"Using INT8 ONNX model: {onnx_path}")
@@ -1076,7 +1026,7 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
             if not onnx_path.exists():
                 logger.error(
                     f"ONNX model not found at {onnx_path}. "
-                    f"Run 'jaeger utils convert-graph -m {model_name} -o {graph_dir.parent} --mode onnx' first."
+                    f"Run 'jaeger utils convert-model -m {model_name} -o {graph_dir.parent} --mode onnx' first."
                 )
                 sys.exit(1)
 
@@ -1119,75 +1069,33 @@ def run_core(chunk_size: int = 0, argv: list[str] | None = None, **kwargs):
 
     if user_min_len is not None and user_min_len < fsize:
         logger.info(
-            f"Two-pass prediction: long contigs (>= {fsize} bp) then short contigs "
-            f"({user_min_len}-{fsize - 1} bp)"
+            f"Including short contigs ({user_min_len}-{fsize - 1} bp) by padding "
+            f"them to {fsize} bp in the main inference pass"
         )
-        long_dataset = _build_prediction_dataset(
-            input_file_path=input_file_path,
-            num=num,
-            string_processor_config=string_processor_config,
-            fragsize=fsize,
-            stride=stride,
-            batch=batch_size,
-            min_len=fsize,
-            max_len=None,
-            dynamic_stride=dynamic_stride,
-            dynamic_stride_threshold=dynamic_stride_threshold,
-            dustmask=dustmask,
-            use_padded_batch=False,
-        )
-        short_dataset = _build_prediction_dataset(
-            input_file_path=input_file_path,
-            num=num,
-            string_processor_config=string_processor_config,
-            fragsize=fsize,
-            stride=stride,
-            batch=batch_size,
-            min_len=user_min_len,
-            max_len=fsize - 1,
-            dynamic_stride=dynamic_stride,
-            dynamic_stride_threshold=dynamic_stride_threshold,
-            dustmask=dustmask,
-            use_padded_batch=True,
-        )
-        with strategy.scope():
-            try:
-                logger.info("starting model inference on long contigs")
-                y_pred_long = model.predict(long_dataset, no_progress=True)
-                logger.info("starting model inference on short contigs")
-                y_pred_short = model.predict(short_dataset, no_progress=True)
-                y_pred = _concat_predictions(y_pred_long, y_pred_short)
-            except Exception as e:
-                logger.debug(traceback.format_exc())
-                logger.error(
-                    f"an error {e} occured during inference on {'|'.join(device_names)}! check {log_file} for traceback."
-                )
-                sys.exit(1)
-    else:
-        idataset = _build_prediction_dataset(
-            input_file_path=input_file_path,
-            num=num,
-            string_processor_config=string_processor_config,
-            fragsize=fsize,
-            stride=stride,
-            batch=batch_size,
-            min_len=min_len,
-            max_len=None,
-            dynamic_stride=dynamic_stride,
-            dynamic_stride_threshold=dynamic_stride_threshold,
-            dustmask=dustmask,
-            use_padded_batch=False,
-        )
-        with strategy.scope():
-            try:
-                logger.info("starting model inference")
-                y_pred = model.predict(idataset, no_progress=True)
-            except Exception as e:
-                logger.debug(traceback.format_exc())
-                logger.error(
-                    f"an error {e} occured during inference on {'|'.join(device_names)}! check {log_file} for traceback."
-                )
-                sys.exit(1)
+
+    idataset = _build_prediction_dataset(
+        input_file_path=input_file_path,
+        num=num,
+        string_processor_config=string_processor_config,
+        fragsize=fsize,
+        stride=stride,
+        batch=batch_size,
+        min_len=min_len,
+        max_len=None,
+        dynamic_stride=dynamic_stride,
+        dynamic_stride_threshold=dynamic_stride_threshold,
+        dustmask=dustmask,
+    )
+    with strategy.scope():
+        try:
+            logger.info("starting model inference")
+            y_pred = model.predict(idataset, no_progress=True)
+        except Exception as e:
+            logger.debug(traceback.format_exc())
+            logger.error(
+                f"an error {e} occured during inference on {'|'.join(device_names)}! check {log_file} for traceback."
+            )
+            sys.exit(1)
 
     # Remove the CLI model name from kwargs to avoid shadowing the loaded
     # ``model`` object passed explicitly below.

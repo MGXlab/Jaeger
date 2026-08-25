@@ -19,6 +19,20 @@ from jaeger.postprocess.helpers import (
 logger = logging.getLogger("jaeger")
 
 
+def _logits_to_probs(logits: np.ndarray) -> np.ndarray:
+    """Convert contig-level logits to probabilities for TSV display.
+
+    Multi-class inputs are row-wise softmaxed; single-column inputs are
+    sigmoided. Computation is done in float32 for numerical stability.
+    """
+    logits = np.asarray(logits, dtype=np.float32)
+    if logits.shape[-1] == 1:
+        return 1.0 / (1.0 + np.exp(-logits))
+    logits = logits - logits.max(axis=-1, keepdims=True)
+    exp_logits = np.exp(logits)
+    return exp_logits / exp_logits.sum(axis=-1, keepdims=True)
+
+
 # legacy methods
 def pred_to_dict_legacy(config, y_pred, **kwargs) -> pd.DataFrame:
     # output preprocessing
@@ -179,8 +193,8 @@ def generate_summary_legacy(config, data) -> pd.DataFrame:
         how="left",
     ).reset_index(names="contig_id")
 
-    # Replace "___" with "," in contig_id
-    df["contig_id"] = df["contig_id"].str.replace("___", ",")
+    # Replace "___" with " " and "#" with "," in contig_id
+    df["contig_id"] = df["contig_id"].str.replace("___", " ").str.replace("#", ",")
 
     return df
 
@@ -189,7 +203,7 @@ def write_output_legacy(
     config: Any,
     data: dict,
     reliability_cutoff: float = 0.5,
-    phage_score: int = 3,
+    phage_score: float = 0.5,
     **kwargs,
 ):
     """
@@ -228,20 +242,6 @@ def write_output_legacy(
 
     logger.info("Summary generation completed!")
     # except Exception as e:
-
-
-def frac_above_threshold(
-    pairs, threshold: float = 0.5, fmt: str = "{:.2f}", none_str: str = "-"
-) -> str:
-    if pairs is None:
-        return none_str
-
-    arr = np.asarray(pairs, dtype=float)  # shape (n, 2)
-    if arr.size == 0:
-        return fmt.format(0.0)
-
-    frac = (arr > threshold).mean()  # mean over all elements
-    return fmt.format(frac)
 
 
 def pred_to_dict(y_pred: dict, **kwargs) -> tuple[dict, dict]:
@@ -320,8 +320,15 @@ def pred_to_dict(y_pred: dict, **kwargs) -> tuple[dict, dict]:
         lambda i: y_pred[i].astype(float), ["meta_7", "meta_8", "meta_6", "meta_5"]
     )
     fsize = kwargs["fsize"]
-    ns = (fsize - (a + t + g + c)) / fsize
-    gcs = (g + c) / fsize
+    # Use the actual window length rather than fsize as the denominator. Short
+    # contigs are encoded as a single whole-contig window shorter than fsize,
+    # and the final window of long contigs can also be partial. meta_1 holds
+    # the window start index and meta_4 holds the contig length.
+    index = np.array(y_pred["meta_1"], dtype=np.int32)
+    seqlen = np.array(y_pred["meta_4"], dtype=np.int32)
+    window_len = np.minimum(fsize, seqlen - index).astype(float)
+    ns = (window_len - (a + t + g + c)) / window_len
+    gcs = (g + c) / window_len
 
     ns = np.split(ns, split_indices)
     gcs = np.split(gcs, split_indices)
@@ -387,13 +394,14 @@ def pred_to_dict(y_pred: dict, **kwargs) -> tuple[dict, dict]:
         prophage_contam = (pred_sum < pred_var) & (consensus == 0)
         host_contam = (pred_sum < pred_var) & (consensus == 1)
 
-    # explore differernt ways to summarize
     if ood is not None:
-        # ood = np.array([np.squeeze(np.mean(sigmoid(p), axis=0)) for p in ood], dtype=np.float16)
+        # Contig-level reliability: mean of the per-window reliability
+        # probabilities (sigmoid of the head logits). Smooth and monotone in
+        # window confidence, unlike a hard fraction-above-cutoff count.
         ood = np.array(
-            [frac_above_threshold(sigmoid(p)) for p in ood], dtype=np.float16
+            [np.squeeze(np.mean(sigmoid(p), axis=0)) for p in ood],
+            dtype=np.float16,
         )
-        # ood = np.array([sigmoid(p) for p in ood_sum])
 
     entropy_mean = np.array(
         [np.squeeze(np.mean(e)) for e in entropy_pred], dtype=np.float16
@@ -466,13 +474,21 @@ def generate_summary(data, **kwargs) -> pd.DataFrame:
     # Basic summary columns
     if data.get("has_reliability", True):
         reliability_score = data["ood"]
+        # Contigs the reliability head cannot vouch for (mean per-window
+        # probability below 0.5) are labeled "uncertain" instead of the
+        # argmax class.
+        prediction = [
+            class_map[c] if r >= 0.5 else "uncertain"
+            for c, r in zip(data["consensus"], reliability_score)
+        ]
     else:
         reliability_score = ["unavailable"] * len(data["headers"])
+        prediction = [class_map[x] for x in data["consensus"]]
 
     columns = {
         "contig_id": data["headers"],
         "length": data["length"],
-        "prediction": [class_map[x] for x in data["consensus"]],
+        "prediction": prediction,
         "entropy": data["entropy"],
         "energy": data["energy"],
         "reliability_score": reliability_score,
@@ -493,13 +509,15 @@ def generate_summary(data, **kwargs) -> pd.DataFrame:
     # class_map2 = {int(k): v for k, v in classes_.items()}
     # columns["prediction_2"] = [class_map2[x] for x in (ev + av + bv)]
 
-    # Appends class-wise information to the dictionary
-    # print(data["pred_sum"])
+    # Appends class-wise information to the dictionary. Score columns are
+    # displayed as probabilities (softmax of mean logits), while the internal
+    # pred_sum/pred_var stay in logit space for downstream logic.
+    pred_sum_prob = _logits_to_probs(data["pred_sum"])
     if len(class_map.keys()) > 2:
         for i, label in class_map.items():
             columns[f"#_{label}_windows"] = [x[i] for x in data["per_class_counts"]]
         for i, label in class_map.items():
-            columns[f"{label}_score"] = [x[i] for x in data["pred_sum"]]
+            columns[f"{label}_score"] = pred_sum_prob[:, i]
             columns[f"{label}_var"] = [x[i] for x in data["pred_var"]]
 
         # Append the window summary column - string showing virus / phage predictions
@@ -509,7 +527,7 @@ def generate_summary(data, **kwargs) -> pd.DataFrame:
         for i, label in class_map.items():
             columns[f"#_{label}_windows"] = [x[i] for x in data["per_class_counts"]]
 
-        columns["score"] = data["pred_sum"]
+        columns["score"] = pred_sum_prob
         columns["var"] = data["pred_var"]
 
     columns["window_summary"] = [
@@ -552,13 +570,15 @@ def generate_summary(data, **kwargs) -> pd.DataFrame:
     # print(data["repeats"], data["repeats"].shape)
     # print(df)
     # print(df.size, df.shape)
-    # Replace "___" with "," in contig_id
-    df["contig_id"] = df["contig_id"].str.replace("___", ",")
+    # Replace "___" with " " and "#" with "," in contig_id
+    df["contig_id"] = df["contig_id"].str.replace("___", " ").str.replace("#", ",")
 
     return df
 
 
-def write_output(data: dict, reliability_cutoff: float = 0.5, phage_score=1, **kwargs):
+def write_output(
+    data: dict, reliability_cutoff: float = 0.5, phage_score: float = 0.5, **kwargs
+):
     """
     Writes the output based on the provided arguments, configuration, and data.
 

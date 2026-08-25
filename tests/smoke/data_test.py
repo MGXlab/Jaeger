@@ -8,7 +8,7 @@ Tests all public APIs:
 - loaders: numpy dataset loaders
 - converters: convert_dataset dispatcher
 - tfrecord: TFRecord parsing
-- ood: shuffle_core, split_core
+- ood: generate_ood_csv_core, split_core
 - raw_processors: codon lookup, runtime preprocessing
 """
 

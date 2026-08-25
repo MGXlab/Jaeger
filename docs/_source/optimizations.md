@@ -114,7 +114,7 @@ pip install tensorrt==10.16.1.11
 ### 3.2 Convert the model
 
 ```bash
-jaeger utils convert-graph \
+jaeger utils convert-model \
   -m jaeger_57341_1.5M_fragment \
   -o ./optimized \
   --mode onnx
@@ -169,22 +169,22 @@ SavedModel.
 
 ```bash
 # Dynamic range quantization (recommended)
-jaeger utils quantize \
+jaeger utils convert-model \
   -m jaeger_57341_1.5M_fragment \
   -o ./quantized \
-  --mode dynamic
+  --mode tflite --quantize dynamic
 
 # Float16 weights
-jaeger utils quantize \
+jaeger utils convert-model \
   -m jaeger_57341_1.5M_fragment \
   -o ./quantized \
-  --mode float16
+  --mode tflite --quantize float16
 
 # Full INT8 (experimental)
-jaeger utils quantize \
+jaeger utils convert-model \
   -m jaeger_57341_1.5M_fragment \
   -o ./quantized \
-  --mode full_int8
+  --mode tflite --quantize full_int8
 ```
 
 This creates:
@@ -233,7 +233,7 @@ pip install onnxruntime-gpu tf2onnx sympy onnx
 ### 5.2 Convert and quantize
 
 ```bash
-jaeger utils convert-graph \
+jaeger utils convert-model \
   -m jaeger_57341_1.5M_fragment \
   -o ./optimized \
   --mode onnx \
@@ -292,7 +292,7 @@ docker run --gpus all -it nvcr.io/nvidia/tensorflow:24.10-tf2-py3
 Inside the container, install Jaeger and run:
 
 ```bash
-jaeger utils convert-graph \
+jaeger utils convert-model \
   -m jaeger_57341_1.5M_fragment \
   -o ./optimized \
   --mode tensorrt
@@ -360,11 +360,11 @@ When training large models, the biggest bottleneck is often not the GPU but the 
 
 ### 7.1 Convert your training data
 
-Use the `jaeger utils optimize-data` command. The `--format` option selects the representation written to the `.npz` file (`translated`, `nucleotide`, or `both`). In the training config, set `data_format: numpy` so Jaeger loads the `.npz` directly.
+Use the `jaeger utils encode-npz` command. The `--format` option selects the representation written to the `.npz` file (`translated`, `nucleotide`, or `both`). In the training config, set `data_format: numpy` so Jaeger loads the `.npz` directly.
 
 ```bash
 # Translated representation (default for most Jaeger models)
-jaeger utils optimize-data \
+jaeger utils encode-npz \
   -i train_shuffled.csv \
   -o train_shuffled_translated.npz \
   --format translated \
@@ -372,7 +372,7 @@ jaeger utils optimize-data \
   --num-classes 3
 
 # Nucleotide/one-hot representation
-jaeger utils optimize-data \
+jaeger utils encode-npz \
   -i train_shuffled.csv \
   -o train_shuffled_nucleotide.npz \
   --format nucleotide \
@@ -380,7 +380,7 @@ jaeger utils optimize-data \
   --num-classes 3
 
 # Both translated and nucleotide representations in one file
-jaeger utils optimize-data \
+jaeger utils encode-npz \
   -i train_shuffled.csv \
   -o train_shuffled_both.npz \
   --format both \
@@ -423,7 +423,7 @@ A 3.1M sample dataset preprocessed as NumPy is ~1.9 GB (int32) and easily fits i
 
 | Need | Recommended option |
 |------|-------------------|
-| Maximum throughput, no augmentations | `jaeger utils optimize-data --format translated` |
+| Maximum throughput, no augmentations | `jaeger utils encode-npz --format translated` |
 | Need runtime augmentations (shuffle, mutate) | Convert with `--format translated` and configure `string_processor` to use integer sequences; one-hot tensors cannot be shuffled/mutated at runtime |
 | Quick experiments, small datasets | `csv` (default) |
 
@@ -452,13 +452,13 @@ A 3.1M sample dataset preprocessed as NumPy is ~1.9 GB (int32) and easily fits i
 | Large dataset, repeated shapes | `--xla --precision fp16` |
 | Reliable GPU speedup without custom builds | Convert to ONNX, then `--onnx` |
 | Need smallest model on GPU | Convert to ONNX INT8, then `--onnx --int8` |
-| Need smallest model for edge/mobile | `jaeger utils quantize --mode dynamic` |
-| Maximum performance in NGC containers | `jaeger utils convert-graph --mode tensorrt` |
+| Need smallest model for edge/mobile | `jaeger utils convert-model --mode tflite --quantize dynamic` |
+| Maximum performance in NGC containers | `jaeger utils convert-model --mode tensorrt` |
 
 ### Training
 
 | Situation | Recommended option |
 |-----------|--------------------|
-| GPU utilization < 20%, epoch time dominated by data loading | Convert CSV to `.npz` with `jaeger utils optimize-data --format translated` |
+| GPU utilization < 20%, epoch time dominated by data loading | Convert CSV to `.npz` with `jaeger utils encode-npz --format translated` |
 | Need runtime augmentations + fast loading | Convert with `--format translated` and configure `string_processor` for integer-based augmentation |
 | Quick experiments, small datasets | Stick with CSV (default) |

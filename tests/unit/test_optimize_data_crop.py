@@ -43,3 +43,51 @@ def test_optimize_data_nuc_units_passthrough():
     kw = _call("nuc", [2000], stride=500)
     assert kw["crop_size"] == (2000,)
     assert kw["stride"] == 500
+
+
+def test_optimize_data_target_shards_passthrough():
+    """--target-shards must be forwarded to convert_dataset as target_num_shards."""
+    from jaeger.commands import utils as u
+
+    with mock.patch.object(u, "convert_dataset") as cd:
+        u.optimize_data_core(
+            input_path="in.csv",
+            output_path="out.npz",
+            format="translated",
+            crop_size=(665,),
+            crop_units="codon",
+            target_num_shards=7,
+        )
+    assert cd.call_args.kwargs["target_num_shards"] == 7
+
+
+def test_convert_dataset_target_shards_produces_expected_count(tmp_path):
+    """A real small conversion yields ~target_num_shards shards in the manifest."""
+    import json
+    import random
+
+    np = __import__("numpy")
+
+    rng = random.Random(0)
+    csv = tmp_path / "in.csv"
+    with open(csv, "w") as fh:
+        for i in range(200):
+            seq = "".join(rng.choices("ACGT", k=2000))
+            fh.write(f"{i % 6},{seq}\n")
+
+    out = tmp_path / "out.npz"
+    from jaeger.dataops.convert import convert_dataset
+
+    convert_dataset(
+        input_path=str(csv),
+        output_path=str(out),
+        format="translated",
+        crop_size=665,
+        num_classes=6,
+        num_workers=1,
+        target_num_shards=8,
+    )
+    with np.load(out, allow_pickle=True) as data:
+        assert "_jaeger_manifest" in data.files
+        manifest = json.loads(str(data["_jaeger_manifest"].item()))
+        assert int(manifest["num_shards"]) == 8

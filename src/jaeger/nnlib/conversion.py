@@ -37,6 +37,7 @@ def convert_graph(
     mode: str,
     verbose: int = 0,
     int8: bool = False,
+    quantize: str | None = None,
 ):
     """Core graph conversion logic (non-CLI).
 
@@ -52,7 +53,18 @@ def convert_graph(
         Verbosity level (currently unused but kept for API consistency).
     int8:
         If ``True`` and *mode* is ``"onnx"``, apply static INT8 quantization.
+    quantize:
+        TFLite quantization mode, one of ``"dynamic"``, ``"float16"`` or
+        ``"full_int8"``. Only valid when *mode* is ``"tflite"``. ``None``
+        applies default dynamic-range optimization.
     """
+    if quantize is not None and mode != "tflite":
+        raise ValueError("--quantize is only valid with --mode tflite")
+    if quantize is not None and quantize not in ("dynamic", "float16", "full_int8"):
+        raise ValueError(
+            f"Invalid quantize mode: {quantize!r}. "
+            "Use 'dynamic', 'float16' or 'full_int8'."
+        )
     log = logging.getLogger("Jaeger")
     log.info(f"Converting model '{model}' with mode '{mode}'")
 
@@ -64,8 +76,14 @@ def convert_graph(
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
 
-    suffix = "_int8" if (mode == "onnx" and int8) else ""
-    converted_dir = output / f"{model}_{mode}{suffix}"
+    if mode == "tflite" and quantize:
+        # Match the legacy `jaeger utils quantize` output layout
+        # (<model>_<quantize>/<model>_<quantize>.tflite) so that
+        # `jaeger predict --quantized <mode>` can locate the model.
+        converted_dir = output / f"{model}_{quantize}"
+    else:
+        suffix = "_int8" if (mode == "onnx" and int8) else ""
+        converted_dir = output / f"{model}_{mode}{suffix}"
     if converted_dir.exists():
         shutil.rmtree(converted_dir)
     converted_dir.mkdir(parents=True)
@@ -80,7 +98,7 @@ def convert_graph(
     if mode == "xla":
         _convert_xla(graph_dir, converted_dir, model, log)
     elif mode == "tflite":
-        _convert_tflite(graph_dir, converted_dir, model, log)
+        _convert_tflite(graph_dir, converted_dir, model, log, quantize=quantize)
     elif mode == "onnx":
         _convert_onnx(graph_dir, converted_dir, model, log, int8=int8)
     elif mode == "tensorrt":
@@ -92,6 +110,7 @@ def convert_graph(
         "original_graph": str(graph_dir),
         "conversion_mode": mode,
         "int8_quantization": bool(int8) if mode == "onnx" else None,
+        "tflite_quantization": quantize if mode == "tflite" else None,
         "output_dir": str(converted_dir),
     }
     info_path = converted_dir / "conversion_info.yaml"
@@ -198,9 +217,21 @@ def _convert_xla(
 
 
 def _convert_tflite(
-    graph_dir: Path, output_dir: Path, model_name: str, log: logging.Logger
+    graph_dir: Path,
+    output_dir: Path,
+    model_name: str,
+    log: logging.Logger,
+    quantize: str | None = None,
 ):
-    """Convert SavedModel to TFLite (same as quantize but without quantization)."""
+    """Convert SavedModel to TFLite, optionally with weight/activation quantization.
+
+    *quantize* selects the quantization mode:
+      - ``None`` / ``"dynamic"``: dynamic-range quantization (INT8 weights,
+        FP32 activations). Default optimization.
+      - ``"float16"``: FP16 weights, FP32 activations.
+      - ``"full_int8"``: full integer quantization (experimental; uses a
+        representative dataset and may reduce accuracy).
+    """
     log.info("Loading SavedModel for TFLite conversion...")
     loaded = tf.saved_model.load(str(graph_dir))
     infer = loaded.signatures["serving_default"]
@@ -208,21 +239,41 @@ def _convert_tflite(
     log.info("Converting to frozen graph...")
     frozen_func = convert_variables_to_constants_v2(infer)
 
-    log.info("Converting to TFLite...")
+    log.info(f"Converting to TFLite (quantize={quantize or 'dynamic'})...")
     converter = tf.lite.TFLiteConverter.from_concrete_functions([frozen_func])
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
     # Jaeger models use ops (e.g., Gelu, BatchMatMul) that are not in the
     # baseline TFLite builtin set; allow TensorFlow fallback ops.
     converter.target_spec.supported_ops = [
         tf.lite.OpsSet.TFLITE_BUILTINS,
         tf.lite.OpsSet.SELECT_TF_OPS,
     ]
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+
+    if quantize == "float16":
+        converter.target_spec.supported_types = [tf.float16]
+    elif quantize == "full_int8":
+        log.warning(
+            "full_int8 mode is experimental and may reduce accuracy. "
+            "Use a representative dataset from your target domain for best results."
+        )
+        converter.representative_dataset = _make_rep_dataset
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
 
     tflite_model = converter.convert()
 
-    tflite_path = output_dir / f"{model_name}.tflite"
+    if quantize:
+        # Legacy quantize layout: <model>_<quantize>.tflite (see predict.py).
+        tflite_path = output_dir / f"{model_name}_{quantize}.tflite"
+    else:
+        tflite_path = output_dir / f"{model_name}.tflite"
     tflite_path.write_bytes(tflite_model)
     log.info(f"Saved TFLite model: {tflite_path} ({len(tflite_model) / 1024:.1f} KB)")
+
+
+def _make_rep_dataset():
+    """Create a representative dataset generator for INT8 quantization."""
+    for _ in range(100):
+        yield [np.random.randn(1, 6, 100, 64).astype(np.float32)]
 
 
 # ------------------------------------------------------------------

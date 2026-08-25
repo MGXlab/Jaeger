@@ -36,7 +36,7 @@ All three can be trained jointly or independently.
 ```
 1. Prepare FASTA files per class
         ↓
-2. Generate fragments (jaeger utils dataset / fragment)
+2. Generate fragments (jaeger utils build-dataset / sample-fragments)
         ↓
 3. Convert to CSV format (jaeger utils convert)
         ↓
@@ -67,11 +67,11 @@ data/
 
 ### Step 2: Generate training fragments
 
-Use `jaeger utils dataset` to create non-redundant fragment databases:
+Use `jaeger utils build-dataset` to create non-redundant fragment databases:
 
 ```bash
 # Fragment bacteria genomes into 2048 bp pieces with 60% identity filtering
-jaeger utils dataset \
+jaeger utils build-dataset \
   -i bacteria.fasta \
   -o bacteria_fragments.csv \
   --itype fasta \
@@ -103,7 +103,7 @@ Parameters explained:
 For more realistic training data, simulate variable-length fragments:
 
 ```bash
-jaeger utils fragment \
+jaeger utils sample-fragments \
   -i phage.fasta \
   -o phage_fragments.fasta \
   --minlen 1000 \
@@ -113,7 +113,7 @@ jaeger utils fragment \
 
 Then convert to CSV:
 ```bash
-jaeger utils convert \
+jaeger utils convert-sequences \
   -i phage_fragments.fasta \
   -o phage_fragments.csv \
   --itype fasta
@@ -124,7 +124,7 @@ jaeger utils convert \
 The reliability head needs out-of-distribution examples. Use shuffled sequences:
 
 ```bash
-jaeger utils ood-data \
+jaeger utils generate-ood \
   -i combined_train.csv \
   -o ood_train.csv \
   --itype csv \
@@ -160,11 +160,11 @@ For example, a 3.1M sample dataset (~15 GB preprocessed) easily fits in most tra
 
 ### Converting CSV to the NumPy format
 
-Use the `jaeger utils optimize-data` command. The `--format` option controls the type of preprocessing applied during conversion, not the training `data_format`, which is always `numpy` for `.npz` inputs:
+Use the `jaeger utils encode-npz` command. The `--format` option controls the type of preprocessing applied during conversion, not the training `data_format`, which is always `numpy` for `.npz` inputs:
 
 ```bash
 # Translated representation (default for most Jaeger models)
-jaeger utils optimize-data \
+jaeger utils encode-npz \
   -i train_shuffled.csv \
   -o train_shuffled_translated.npz \
   --format translated \
@@ -172,7 +172,7 @@ jaeger utils optimize-data \
   --num-classes 3
 
 # Nucleotide/one-hot representation
-jaeger utils optimize-data \
+jaeger utils encode-npz \
   -i train_shuffled.csv \
   -o train_shuffled_nucleotide.npz \
   --format nucleotide \
@@ -180,7 +180,7 @@ jaeger utils optimize-data \
   --num-classes 3
 
 # Both translated and nucleotide representations in one file
-jaeger utils optimize-data \
+jaeger utils encode-npz \
   -i train_shuffled.csv \
   -o train_shuffled_both.npz \
   --format both \
@@ -192,7 +192,7 @@ Convert both training and validation sets:
 
 ```bash
 for split in train val; do
-  jaeger utils optimize-data \
+  jaeger utils encode-npz \
     -i ${split}_shuffled.csv \
     -o ${split}_shuffled.npz \
     --format translated \
@@ -460,7 +460,7 @@ jaeger register-models --path /path/to/my_model
 Gradually mask random positions to improve robustness:
 
 ```bash
-jaeger utils mask \
+jaeger utils mask-sequences \
   -i train.fasta \
   -o train_masked.fasta \
   --minperc 0.0 \
@@ -473,7 +473,7 @@ jaeger utils mask \
 Introduce random mutations instead of masking:
 
 ```bash
-jaeger utils mask \
+jaeger utils mask-sequences \
   -i train.fasta \
   -o train_mutated.fasta \
   --mutate \

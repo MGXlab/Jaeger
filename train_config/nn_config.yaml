@@ -279,6 +279,7 @@ model:
         bias_initializer: calculate_from_train_data
 
   reliability_model:
+    merge: sum
     input_shape: 256
     hidden_layers:
     - name: dense
@@ -319,7 +320,7 @@ training:
   classifier_validation_steps: -1
   reliability_validation_steps: -1
   batch_size: 64
-  optimizer: adam  #adam, rmsprop, sgd
+  optimizer: muon  #adam, rmsprop, sgd
   optimizer_params:
     learning_rate: 0.0003
     clipnorm: 5

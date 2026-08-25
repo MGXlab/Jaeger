@@ -81,7 +81,6 @@ def test_circular_plot_tolerates_terminal_overshoot(tmp_path):
     plot_scores(
         logits_df,
         config=CONFIG,
-        model="test",
         fsize=2000,
         infile_base="test",
         outdir=tmp_path,
@@ -97,7 +96,6 @@ def test_circular_plot_stride_overshoot(tmp_path):
     plot_scores(
         logits_df,
         config=CONFIG,
-        model="test",
         fsize=2000,
         infile_base="test",
         outdir=tmp_path,
@@ -114,7 +112,6 @@ def test_linear_plot_tolerates_terminal_overshoot(tmp_path):
     plot_scores_linear(
         logits_df,
         config=CONFIG,
-        model="test",
         fsize=2000,
         infile_base="test",
         outdir=tmp_path,

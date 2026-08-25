@@ -54,7 +54,6 @@ def logits_to_df(config: Any, cmdline_kwargs: dict, **kwargs) -> dict:
         kwargs.get("gcs"),
     ):
         if length >= cmdline_kwargs.get("lc"):
-            # try:
             value = np.exp(value) / np.sum(np.exp(value), axis=1).reshape(-1, 1)
             # bac, phage, euk, arch
             max_class = np.argmax(np.mean(value, axis=0))
@@ -88,9 +87,6 @@ def logits_to_df(config: Any, cmdline_kwargs: dict, **kwargs) -> dict:
             t["gc_skew"] = scale_range(gc_skew_conv, min=-1, max=1)
 
             tmp[f"{key}"] = [t, host, length]
-        # except Exception as e:
-        #     logger.error(e)
-        #     logger.debug(traceback.format_exc())
 
     return tmp
 
@@ -155,7 +151,6 @@ def logits_to_df_v2(
 def plot_scores(
     logits_df: pd.DataFrame,
     config: Any,
-    model: str,
     fsize: int,
     infile_base: str,
     outdir: Path,
@@ -182,14 +177,13 @@ def plot_scores(
     # quantile cut-off 0.975 (or 0.025 of the right tail)
     lab = {int(k): v for k, v in config["all_labels"].items()}
     step = stride or fsize
-    # legend_lines = []
 
     # Plot outer track with xticks
     major_ticks_interval = 500_000
     minor_ticks_interval = 100_000
 
     for contig_id in logits_df.keys():
-        tmp, host, length = logits_df[contig_id]
+        tmp, _, length = logits_df[contig_id]
         circos = Circos(sectors={contig_id: length})
         sector = circos.get_sector(contig_id)
 
@@ -286,7 +280,8 @@ def plot_scores(
 
         _ = circos.plotfig()
         plt.title(
-            f"{contig_id.replace('___', ',')}", fontdict={"size": 14, "weight": "bold"}
+            f"{contig_id.replace('___', ' ').replace('#', ',')}",
+            fontdict={"size": 14, "weight": "bold"},
         )
         # Add legend
         handles = (
@@ -341,7 +336,7 @@ def plot_scores(
 
         plt.savefig(
             os.path.join(
-                outdir / f"{infile_base}_jaeger_{contig_id.split(' ')[0]}.pdf",
+                outdir / f"{infile_base}_jaeger_{contig_id.split('___')[0]}.pdf",
             ),
             bbox_inches="tight",
             dpi=300,
@@ -350,7 +345,7 @@ def plot_scores(
             (
                 "prophage plot saved at "
                 + os.path.join(
-                    outdir / f"{infile_base}_jaeger_{contig_id.split(' ')[0]}.pdf",
+                    outdir / f"{infile_base}_jaeger_{contig_id.split('___')[0]}.pdf",
                 )
             )
         )
@@ -360,7 +355,6 @@ def plot_scores(
 def plot_scores_linear(
     logits_df: pd.DataFrame,
     config: Any,
-    model: str,
     fsize: int,
     infile_base: str,
     outdir: Path,
@@ -375,7 +369,6 @@ def plot_scores_linear(
     ----
         logits_df: DataFrame containing the logits.
         config: Dictionary containing configuration settings.
-        model: Model identifier string.
         fsize: Fragment size in bp.
         infile_base: Base name of the input file.
         outdir: Output directory for saving the plot.
@@ -391,7 +384,7 @@ def plot_scores_linear(
     colors = ["gray", "green", "red", "teal", "brown", "purple", "pink", "olive"]
 
     for contig_id in logits_df.keys():
-        tmp, host, length = logits_df[contig_id]
+        tmp, _, length = logits_df[contig_id]
         fig, axes = plt.subplots(
             nrows=4,
             ncols=1,
@@ -428,7 +421,7 @@ def plot_scores_linear(
         ax_phage.set_ylim(0, 4)
         ax_phage.set_ylabel("Phage score", fontsize=10)
         ax_phage.set_title(
-            f"{contig_id.replace('___', ',')}",
+            f"{contig_id.replace('___', ' ').replace('#', ',')}",
             fontdict={"size": 12, "weight": "bold"},
         )
         ax_phage.legend(loc="upper right", fontsize=8)
@@ -514,7 +507,9 @@ def plot_scores_linear(
             plt.FuncFormatter(lambda x, _: f"{x / 1e6:.1f} Mb")
         )
 
-        out_path = outdir / f"{infile_base}_jaeger_{contig_id.split(' ')[0]}_linear.pdf"
+        out_path = (
+            outdir / f"{infile_base}_jaeger_{contig_id.split('___')[0]}_linear.pdf"
+        )
         plt.savefig(out_path, bbox_inches="tight", dpi=300)
         logger.info(f"linear prophage plot saved at {out_path}")
         plt.close()
@@ -619,12 +614,10 @@ def _filter_by_score_consistency(
 
 def segment(
     logits_df: pd.DataFrame,
-    outdir: Path,
     cutoff_length: int = 500_000,
     sensitivity: float = 1.5,
     identifier: str = "phage",
     host_identifier: str = "bacteria",
-    fasta_path: str | None = None,
 ) -> dict:
     """
     Segments the logit arrays using a combined approach:
@@ -636,21 +629,19 @@ def segment(
     Args:
     ----
         logits_df (dict): Dictionary containing data for segmentation.
-        outdir (str): Output directory for saving segmentation results.
         cutoff_length (int, optional): Length threshold for segmenting
                                        data. Defaults to 500,000.
         sensitivity (float, optional): Sensitivity threshold for segmentation.
                                        Defaults to 1.5.
         identifier (str, optional): Column name for phage scores.
         host_identifier (str, optional): Column name for host scores.
-        fasta_path (str, optional): Path to FASTA file for phage gene filtering.
 
     Returns:
     -------
         dict: A dictionary containing segmented data coordinates and scores.
     """
     phage_cordinates = {}
-    for key, (tmp, host, length) in logits_df.items():
+    for key, (tmp, _, length) in logits_df.items():
         if length <= cutoff_length:
             continue
 
@@ -768,10 +759,14 @@ def get_prophage_alignment_summary(
 
     Returns:
     -------
-        dict or str: A dictionary containing the prophage
+        dict: A dictionary containing the prophage alignment summary.
     """
 
-    if result_object is None:
+    if result_object is None or result_object.saturated:
+        # ``saturated`` means the 16-bit parasail score overflowed (a very
+        # long/strong terminal repeat); the traceback is unreliable, so the
+        # region is reported without att detail but flagged by att_type.
+        saturated = result_object is not None
         s_alig_start = cordinates["start"][0]
         e_alig_end = cordinates["end"][0]
         sequence = record[1][s_alig_start:e_alig_end]
@@ -793,14 +788,12 @@ def get_prophage_alignment_summary(
             "att_identities": None,
             "att_identity": None,
             "att_score": None,
-            "att_type": None,
+            "att_type": f"{type_}_saturated" if saturated else None,
             "att_fgaps": None,
             "att_rgaps": None,
             "attL": None,
             "attR": None,
         }
-    elif result_object.saturated:
-        return "saturated"
 
     else:
         alig_len = len(result_object.traceback.query)
@@ -882,6 +875,7 @@ def prophage_report(
     refined_boundaries: dict | None = None,
     stride: int | None = None,
     trna_features: dict[str, list[tuple[int, int, int, str]]] | None = None,
+    cutoff_length: int = 500_000,
 ):
     """
     Searches for direct repeats at prophage boundaries and generates
@@ -910,30 +904,15 @@ def prophage_report(
     step = stride or fsize
     summaries = []
 
-    def append_summary(result, seq_len, record, start, end, j, type_):
-        summaries.append(
-            get_prophage_alignment_summary(
-                result_object=result,
-                seq_len=seq_len,
-                record=record,
-                cordinates={
-                    "start": [start, start + off_set],
-                    "end": [end - off_set, end + scan_length],
-                },
-                phage_score=j,
-                type_=type_,
-            )
-        )
-
     total_contigs = len(
         [h for h in prophage_cordinates if len(prophage_cordinates[h][0]) > 0]
     )
     processed_contigs = 0
     for record in pyfastx.Fasta(filehandle, build_index=False):
         seq_len = len(record[1])
-        header = record[0].replace(",", "___")
+        header = record[0].strip().replace(" ", "___").replace(",", "#")
         logger.debug(f"generating prophage report for {header}")
-        if seq_len > 500_000:
+        if seq_len > cutoff_length:
             cords, scores = prophage_cordinates.get(f"{header}", [[], []])
             if len(cords) > 0 and len(scores) > 0:
                 processed_contigs += 1
@@ -1059,7 +1038,9 @@ def prophage_report(
 
     if summaries:
         df = pd.DataFrame(summaries)
-        df["contig_id"] = df["contig_id"].apply(lambda x: x.replace("___", ","))
+        df["contig_id"] = df["contig_id"].apply(
+            lambda x: x.replace("___", " ").replace("#", ",")
+        )
         df.to_csv(
             outdir / "prophages_jaeger.tsv", sep="\t", index=False, float_format="%.3f"
         )

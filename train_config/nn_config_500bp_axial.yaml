@@ -25,13 +25,14 @@ model:
     - null
     embedding_size: 64
     embedding_regularizer: l2
-    embedding_regularizer_w: 1.0e-05
+    embedding_regularizer_w: 0.00001
   string_processor:
+    data_format: numpy
     seq_onehot: false
     codon: CODON
     codon_id: CODON_ID
     crop_size: 500
-    buffer_size: 500000
+    buffer_size: 5000
     shuffle: true
     reshuffle_each_iteration: true
     mutate: false
@@ -57,10 +58,8 @@ model:
         use_bias: true
         activation: null
         kernel_regularizer: l2
-        kernel_regularizer_w: 1.0e-05
-    - name: masked_batchnorm
-      config:
-        return_nmd: false
+        kernel_regularizer_w: 0.00001
+    - name: masked_dyt
     - name: activation
       config:
         activation: gelu
@@ -72,10 +71,9 @@ model:
         kernel_size: 3
         use_bias: true
         kernel_regularizer: l2
-        kernel_regularizer_w: 1.0e-05
-    - name: masked_batchnorm
-      config:
-        return_nmd: false
+        kernel_regularizer_w: 0.00001
+        norm_type: masked_dyt
+    - name: masked_dyt
     - name: activation
       config:
         activation: gelu
@@ -85,11 +83,36 @@ model:
         num_heads: 4
         feed_forward_dim: 128
         dropout_rate: 0.1
-        num_blocks: 1
-    - name: masked_batchnorm
+        num_blocks: 2
+    - name: nmd
+    - name: masked_dyt
+    pooling: max
+  projection:
+    # for supervised contrastive pre-training
+    margin: 0.5
+    scale: 64
+    input_shape: 32
+    hidden_layers:
+    - name: dense
       config:
-        return_nmd: false
-    pooling: average
+        units: 16
+        activation: gelu
+        use_bias: true
+        kernel_regularizer: "l2" # l2, l1
+        kernel_regularizer_w: 0.00001 # 1.0e-5
+    - name: dropout
+      config:
+        rate: 0.1
+    - name: dense
+      config:
+        units: 16
+        activation: gelu
+        use_bias: true
+        kernel_regularizer: "l2" # l2, l1
+        kernel_regularizer_w: 0.00001
+    - name: dropout
+      config:
+        rate: 0.1
   classifier:
     input_shape: 32
     hidden_layers:
@@ -109,25 +132,28 @@ training:
   experiment_root: experiments/experiment_{{ model.experiment }}_{{ model.seed }}
   classifier_dir: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/classifier'
   reliability_dir: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/reliability'
+  projection_dir: '{{ model.base_dir }}/{{ training.experiment_root }}/checkpoints/reliability'
   classifier_epochs: 5
   reliability_epochs: 0
-  projection_epochs: 0
-  classifier_train_steps: 50000
+  projection_epochs: 5
+  classifier_train_steps: -1
   reliability_train_steps: 0
-  classifier_validation_steps: 2500
+  projection_train_steps: -1
+  classifier_validation_steps: -1
   reliability_validation_steps: 0
+  projection_validation_steps: -1
   batch_size: 64
-  optimizer: adam
+  optimizer: muon
   optimizer_params:
-    learning_rate: 0.001
+    learning_rate: 0.0003
     clipnorm: 5
   loss_classifier: categorical_crossentropy
   loss_params_classifier:
     from_logits: true
   classifier_class_weights:
-    0: 0.6912
-    1: 0.7641
-    2: 4.0898
+    0: 1
+    1: 1
+    2: 1
   loss_reliability: binary_crossentropy
   loss_params_reliability:
     from_logits: true
@@ -161,7 +187,7 @@ training:
         monitor: val_loss
         patience: 2
         factor: 0.5
-        min_lr: 1.0e-05
+        min_lr: 0.000001
     - name: TerminateOnNaN
     - name: CSVLogger
       params:
@@ -179,7 +205,7 @@ training:
       - virus
       - plasmid
       path:
-      - '{{ training.data_dir }}/train_shuffled.csv'
+      - '{{ training.data_dir }}/train_shuffled_translated.npz'
       label:
       - 0
       - 1
@@ -190,7 +216,7 @@ training:
       - virus
       - plasmid
       path:
-      - '{{ training.data_dir }}/val_shuffled.csv'
+      - '{{ training.data_dir }}/val_shuffled_translated.npz'
       label:
       - 0
       - 1

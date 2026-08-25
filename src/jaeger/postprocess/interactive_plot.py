@@ -1216,7 +1216,7 @@ def _prepare_plot_data(
 
             fa = pyfastx.Fasta(str(fasta_path), build_index=False)
             for record in fa:
-                header = record[0].strip().replace(",", "___")
+                header = record[0].strip().replace(" ", "___").replace(",", "#")
                 if header == contig_id:
                     sequence = str(record[1])
                     # Predict genes with strand information
@@ -1276,7 +1276,7 @@ def _predict_genes_trnas_worker(
 
     fa = pyfastx.Fasta(fasta_path, build_index=False)
     for record in fa:
-        header = record[0].strip().replace(",", "___")
+        header = record[0].strip().replace(" ", "___").replace(",", "#")
         if header in contig_ids:
             sequence = str(record[1])
             # Predict genes
@@ -1397,7 +1397,8 @@ def plot_scores_html(
             data_json=json.dumps(_to_native(data)),
         )
         out_path = (
-            outdir / f"{infile_base}_jaeger_{contig_id.split(' ')[0]}_interactive.html"
+            outdir
+            / f"{infile_base}_jaeger_{contig_id.split('___')[0]}_interactive.html"
         )
         out_path.write_text(html)
         logger.info(f"interactive prophage plot saved at {out_path}")

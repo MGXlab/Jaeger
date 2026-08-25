@@ -45,6 +45,7 @@ model:
         filter_hidden: 32
         filter_layers: 2
         dropout: 0.1
+        # bidirectional: true  # HyenaDNA-style symmetric FFT padding
     pooling: max
   projection:
     margin: 0.5

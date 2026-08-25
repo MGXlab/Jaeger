@@ -24,6 +24,9 @@ From: python:3.12.7-bookworm
     # Install Jaeger and other dependencies
     pip3 install --root-user-action=ignore --no-cache-dir "jaeger-bio[gpu] @ git+https://github.com/Yasas1994/Jaeger@main" # install jaeger without tensorflow support
     pip3 install --root-user-action=ignore --no-cache-dir  icecream matplotlib seaborn
+    # numba accelerates the translated/nucleotide encoder (convert_dataset); without
+    # it the encoder falls back to a ~300x slower pure-Python path.
+    pip3 install --root-user-action=ignore --no-cache-dir numba
 
     # TensorFlow >=2.16 ships CUDA/cuDNN/NCCL libraries via nvidia-* pip packages.
     # Make their lib/ directories available to the dynamic loader at runtime.

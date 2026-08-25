@@ -33,6 +33,7 @@ requirements:
     - joblib >=1.0
     - kneed >=0.8.5
     - matplotlib-base >=3.7
+    - numba >=0.60
     - numpy >=1.24
     - pandas >=2.2.3
     - polars >=1.2.6

@@ -91,10 +91,11 @@ def run_mmseqs_cluster(frag_fasta, out_prefix, tmpdir, min_id, min_cov):
     )
 
 
-def split_dataset(records, trainperc, valperc, testperc):
+def split_dataset(records, trainperc, valperc, testperc, seed=None):
     """Split records into train, val, and test sets."""
 
-    random.shuffle(records)
+    rng = random.Random(seed)
+    rng.shuffle(records)
     N = len(records)
     n_train = int(trainperc * N)
     n_val = int(valperc * N)
@@ -159,6 +160,7 @@ def build_dataset(**kwargs):
     class_col = kwargs.get("class_col")
     seq_col = kwargs.get("seq_col")
     class_id = kwargs.get("class")
+    seed = kwargs.get("seed")
 
     assert abs(trainperc + valperc + testperc - 1.0) < 1e-6, (
         "train+val+test must sum to 1"
@@ -184,7 +186,7 @@ def build_dataset(**kwargs):
         case "ANI":
             run_mmseqs_cluster(frag_fasta, clusters, tmpdir, maxiden, maxcov)
         case "AAI":
-            NotImplementedError("AAI method is not yet implemented")
+            raise NotImplementedError("AAI method is not yet implemented")
 
     # 4. Load representatives
     rep_seq = out_pref / f"{inp.name}.fragments.clusters_rep_seq.fasta"
@@ -202,7 +204,7 @@ def build_dataset(**kwargs):
         ]
 
     # 5. Split datasets
-    train, val, test = split_dataset(reps, trainperc, valperc, testperc)
+    train, val, test = split_dataset(reps, trainperc, valperc, testperc, seed=seed)
 
     # 6. Write outputs
     write_output(train, val, test, out_pref, outtype)

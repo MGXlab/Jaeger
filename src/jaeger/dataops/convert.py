@@ -1511,6 +1511,10 @@ def _convert_to_npz_streaming(
 
                         result = _process_chunk_npz(batch_lines, **worker_kwargs)
                         _write_shard(_finalize(result))
+                        logger.info(
+                            f"shard {batch_idx - 1:05d}: "
+                            f"{len(result['labels'])} rows written"
+                        )
 
             if batch_idx == 0:
                 raise ValueError(f"Input file is empty: {input_path}")
@@ -1575,6 +1579,7 @@ def convert_dataset(
     pad: bool = False,
     balance_classes: bool = False,
     shuffle_seed: int = 42,
+    target_num_shards: int | None = None,
 ) -> None:
     """Convert a CSV dataset to a compressed NumPy ``.npz`` file.
 
@@ -1692,19 +1697,35 @@ def convert_dataset(
         codon_map_arr = _get_codon_map(codon_map)
         codon_map_len = len(codon_map_arr)
 
-    if max_memory_mb is not None and max_memory_mb > 0:
+    if target_num_shards is not None and target_num_shards > 0:
+        # Tune the streaming budget so the output has ~target_num_shards shards.
+        # The streaming converter uses batch_rows = int(budget * 0.5 / per_row),
+        # so pick the budget that makes batch_rows == ceil(total_lines / target).
+        per_row = _estimate_total_bytes_per_input_row(
+            crop_sizes, strides, format, one_hot, codon_map_len
+        )
+        rows_per_shard = math.ceil(total_lines / target_num_shards)
+        budget = int(2 * per_row * (rows_per_shard + 0.5))
+        logger.info(
+            f"Tuning streaming budget to {budget / (1024 * 1024):.0f} MB "
+            f"for ~{target_num_shards} shard(s)"
+        )
+    elif max_memory_mb is not None and max_memory_mb > 0:
         budget = max_memory_mb * 1024 * 1024
     elif max_memory_mb is None:
         budget = int(psutil.virtual_memory().available * 0.75)
     else:
         budget = None
 
-    stream = False
-    if budget is not None:
+    if target_num_shards is not None and target_num_shards > 0:
+        stream = True
+    elif budget is not None:
         per_row = _estimate_total_bytes_per_input_row(
             crop_sizes, strides, format, one_hot, codon_map_len
         )
         stream = total_lines * per_row > budget
+    else:
+        stream = False
 
     if one_hot and not stream:
         estimated = _estimate_onehot_memory(

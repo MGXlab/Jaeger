@@ -109,7 +109,7 @@ def fragment_generator(
                 header = record[0].strip().replace(",", "___")
                 if max_len is not None and seqlen > max_len:
                     continue
-                if seqlen >= fragsize:
+                if seqlen >= max(fragsize, min_len):
                     if fragsize is None:
                         yield f"{sequence},{header}"
                     else:
@@ -132,14 +132,18 @@ def fragment_generator(
                                 f"{gc_skew: .3f}"
                             )
                 elif seqlen >= min_len:
-                    # Whole-contig window for short sequences.
+                    # Whole-contig window for short sequences, padded to fragsize
+                    # with 'M' so it can share the fixed-shape long-contig path.
+                    # 'M' is used instead of 'N' because N-stretches are otherwise
+                    # treated as low-quality sequence and filtered downstream.
                     g = sequence.count("G")
                     c = sequence.count("C")
                     a = sequence.count("A")
                     t = sequence.count("T")
                     gc_skew = safe_divide((g - c), (g + c))
+                    padded_sequence = sequence + ("M" * (fragsize - seqlen))
                     yield (
-                        f"{sequence},"
+                        f"{padded_sequence},"
                         f"{header},0,1,0,{seqlen},{g},{c},{a},{t},"
                         f"{gc_skew: .3f}"
                     )

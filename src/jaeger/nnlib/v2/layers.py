@@ -1795,6 +1795,7 @@ class ResidualBlock(tf.keras.layers.Layer):
         self.norm_type = kwargs.pop("norm_type", "masked_batchnorm").lower()
         self.alpha_init = kwargs.pop("alpha_init", 0.5)
         self.use_masking = kwargs.pop("use_masking", True)
+        self.mask_mode = kwargs.pop("mask_mode", "any")
 
         if return_nmd and self.norm_type != "masked_batchnorm":
             raise ValueError(
@@ -1822,6 +1823,7 @@ class ResidualBlock(tf.keras.layers.Layer):
             bias_initializer=self.bias_initializer,
             kernel_regularizer=self.kernel_regularizer,
             use_masking=self.use_masking,
+            mask_mode=self.mask_mode,
         )
 
         def _make_norm(name, return_nmd=False):
@@ -1951,6 +1953,7 @@ class ResidualBlock(tf.keras.layers.Layer):
                 "return_nmd": self.return_nmd,
                 "norm_type": self.norm_type,
                 "alpha_init": self.alpha_init,
+                "mask_mode": self.mask_mode,
                 "filters": self.filters,
                 "kernel_size": self.kernel_size,
                 "strides": self.strides,
@@ -2731,28 +2734,54 @@ def causal_fft_convolve(u: tf.Tensor, h: tf.Tensor) -> tf.Tensor:
     Returns:
         y: (batch, dim, L) with the same dtype as ``u``.
     """
+    return fft_convolve(u, h, bidirectional=False)
+
+
+def fft_convolve(u: tf.Tensor, h: tf.Tensor, bidirectional: bool = False) -> tf.Tensor:
+    """Depthwise convolution via FFT.
+
+    Args:
+        u: (batch, dim, L)
+        h: (dim, L) — causal filter, one per channel.
+        bidirectional: If True, pad ``u`` symmetrically with ``L // 2`` zeros
+            on each side before convolving. This turns the causal filter into
+            a centered, bidirectional receptive field (matching HyenaDNA's
+            bidirectional implementation) without changing the filter.
+
+    Returns:
+        y: (batch, dim, L) with the same dtype as ``u``.
+    """
     orig_dtype = u.dtype
     u = tf.cast(u, tf.float32)
     h = tf.cast(h, tf.float32)
 
-    tf.debugging.assert_rank(u, 3, message="causal_fft_convolve: u must be rank 3")
-    tf.debugging.assert_rank(h, 2, message="causal_fft_convolve: h must be rank 2")
+    tf.debugging.assert_rank(u, 3, message="fft_convolve: u must be rank 3")
+    tf.debugging.assert_rank(h, 2, message="fft_convolve: h must be rank 2")
     u_dim = tf.shape(u)[1]
     h_dim = tf.shape(h)[0]
     tf.debugging.assert_equal(
-        u_dim, h_dim, message="causal_fft_convolve: u and h must have matching dim"
+        u_dim, h_dim, message="fft_convolve: u and h must have matching dim"
     )
     u_L = tf.shape(u)[2]
     h_L = tf.shape(h)[1]
     tf.debugging.assert_equal(
-        u_L, h_L, message="causal_fft_convolve: u and h must have matching length"
+        u_L, h_L, message="fft_convolve: u and h must have matching length"
     )
 
     L = tf.shape(u)[-1]
-    n = 2 * L - 1
+    if bidirectional:
+        # HyenaDNA-style bidirectional convolution: center the input in zero
+        # padding so the causal filter sees context on both sides.
+        n = 2 * L
+        pad = L // 2
+        u_pad = tf.pad(u, [[0, 0], [0, 0], [pad, pad]])
+    else:
+        # Keep the original minimum FFT length for causal mode so existing
+        # checkpoints produce bit-identical outputs.
+        n = 2 * L - 1
+        u_pad = tf.pad(u, [[0, 0], [0, 0], [0, n - L]])
 
     h_pad = tf.pad(h, [[0, 0], [0, n - L]])
-    u_pad = tf.pad(u, [[0, 0], [0, 0], [0, n - L]])
 
     H = tf.signal.rfft(h_pad, fft_length=[n])
     U = tf.signal.rfft(u_pad, fft_length=[n])
@@ -2946,6 +2975,7 @@ class HyenaOperator(tf.keras.layers.Layer):
         filter_layers: int = 2,
         filter_activation: str = "gelu",
         filter_normalize: bool = False,
+        bidirectional: bool = False,
         kernel_regularizer=None,
         **kwargs,
     ):
@@ -2957,6 +2987,7 @@ class HyenaOperator(tf.keras.layers.Layer):
         self.filter_layers = filter_layers
         self.filter_activation = filter_activation
         self.filter_normalize = filter_normalize
+        self.bidirectional = bidirectional
         self.kernel_regularizer = tf.keras.regularizers.get(kernel_regularizer)
 
     def build(self, input_shape):
@@ -2996,7 +3027,7 @@ class HyenaOperator(tf.keras.layers.Layer):
         for i in range(self.order):
             gate = tf.transpose(proj[i + 1], [0, 2, 1])
             h = filters[i]
-            conv = causal_fft_convolve(z, h)
+            conv = fft_convolve(z, h, bidirectional=self.bidirectional)
             z = conv * gate
 
         return tf.transpose(z, [0, 2, 1])
@@ -3012,6 +3043,7 @@ class HyenaOperator(tf.keras.layers.Layer):
                 "filter_layers": self.filter_layers,
                 "filter_activation": self.filter_activation,
                 "filter_normalize": self.filter_normalize,
+                "bidirectional": self.bidirectional,
                 "kernel_regularizer": tf.keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),
@@ -3055,6 +3087,7 @@ class HyenaBlock(tf.keras.layers.Layer):
         dropout: float = 0.0,
         output_projection: bool = False,
         filter_normalize: bool = False,
+        bidirectional: bool = False,
         kernel_regularizer=None,
         **kwargs,
     ):
@@ -3068,6 +3101,7 @@ class HyenaBlock(tf.keras.layers.Layer):
         self.dropout = dropout
         self.output_projection = output_projection
         self.filter_normalize = filter_normalize
+        self.bidirectional = bidirectional
         self.kernel_regularizer = tf.keras.regularizers.get(kernel_regularizer)
         self.supports_masking = True
 
@@ -3082,6 +3116,7 @@ class HyenaBlock(tf.keras.layers.Layer):
             filter_layers=self.filter_layers,
             filter_activation=self.filter_activation,
             filter_normalize=self.filter_normalize,
+            bidirectional=self.bidirectional,
             kernel_regularizer=self.kernel_regularizer,
         )
         self.hyena.build((None, input_shape[2], self.dim))
@@ -3145,6 +3180,7 @@ class HyenaBlock(tf.keras.layers.Layer):
                 "dropout": self.dropout,
                 "output_projection": self.output_projection,
                 "filter_normalize": self.filter_normalize,
+                "bidirectional": self.bidirectional,
                 "kernel_regularizer": tf.keras.regularizers.serialize(
                     self.kernel_regularizer
                 ),

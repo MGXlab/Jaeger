@@ -8,7 +8,7 @@ import lzma
 import os
 import pyfastx
 
-logger = logging.getLogger("Jaeger")
+logger = logging.getLogger("jaeger")
 
 
 class Compression(Enum):
@@ -101,13 +101,27 @@ def validate_fasta_entries(
 ) -> Union[int, Exception]:
     num = 0
     gt_min_len = 0
+    seen_headers: set[str] = set()
+    duplicates: set[str] = set()
     # try:
     logger.debug("validating fasta file")
     fa = pyfastx.Fasta(input_file_path, build_index=False)
     for seq in fa:
         num += 1
         gt_min_len += 1 if len(seq[1]) >= min_len else 0
+        header = seq[0].strip().replace(" ", "___").replace(",", "#")
+        if header in seen_headers:
+            duplicates.add(header)
+        else:
+            seen_headers.add(header)
     logger.info(f"{gt_min_len}/{num} entries in {input_file_path}")
+
+    if duplicates:
+        raise Exception(
+            f"Duplicate sequence headers in {input_file_path}: "
+            f"{', '.join(sorted(duplicates))}. "
+            "Headers must be unique (only the first word of each header is used)."
+        )
 
     if gt_min_len == 0:
         raise Exception(f"all records in {input_file_path} are < {min_len}bp")

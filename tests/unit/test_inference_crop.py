@@ -57,7 +57,6 @@ def test_build_prediction_dataset_uses_fsize_not_config_crop(tmp_path):
         max_len=None,
         dynamic_stride=False,
         dynamic_stride_threshold=0.0,
-        use_padded_batch=True,
     )
     translated = next(iter(ds))[0]["translated"]
     assert int(translated.shape[-1]) == 665
@@ -82,14 +81,17 @@ def test_build_prediction_dataset_honors_smaller_fsize(tmp_path):
         max_len=None,
         dynamic_stride=False,
         dynamic_stride_threshold=0.0,
-        use_padded_batch=True,
     )
     translated = next(iter(ds))[0]["translated"]
     assert int(translated.shape[-1]) == 498
 
 
 def _write_project_yaml(
-    path, *, crop_size: int, input_type: str = "translated", crop_units: str | None = None
+    path,
+    *,
+    crop_size: int,
+    input_type: str = "translated",
+    crop_units: str | None = None,
 ) -> None:
     units_line = f"    crop_units: {crop_units}\n" if crop_units is not None else ""
     path.write_text(

@@ -307,7 +307,6 @@ def run_core(**kwargs):
 
                     phage_cord = segment(
                         logits_df,
-                        outdir=plots_dir,
                         cutoff_length=kwargs.get("lc"),
                         sensitivity=kwargs.get("sensitivity"),
                         identifier="phage",
@@ -317,7 +316,6 @@ def run_core(**kwargs):
                         plot_scores(
                             logits_df,
                             config=config,
-                            model=MODEL,
                             fsize=kwargs.get("fsize"),
                             infile_base=file_base,
                             outdir=plots_dir,
@@ -328,7 +326,6 @@ def run_core(**kwargs):
                         plot_scores_linear(
                             logits_df,
                             config=config,
-                            model=MODEL,
                             fsize=kwargs.get("fsize"),
                             infile_base=file_base,
                             outdir=plots_dir,

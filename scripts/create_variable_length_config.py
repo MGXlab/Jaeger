@@ -31,7 +31,7 @@ def main() -> int:
     sp["length"] = None
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(yaml.dump(cfg))
+    args.output.write_text(yaml.dump(cfg, sort_keys=False))
     print(f"Wrote variable-length config to {args.output}")
     return 0
 
