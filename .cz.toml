@@ -2,7 +2,7 @@
 name = "cz_conventional_commits"
 tag_format = "v$version"
 version_scheme = "pep440"
-version = "1.26.4"
+version = "1.26.5"
 update_changelog_on_bump = true
 version_files = [
     "pyproject.toml:version",
