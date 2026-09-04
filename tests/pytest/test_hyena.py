@@ -171,7 +171,7 @@ def test_hyena_block_masked_equals_truncated():
 
 
 def test_builder_creates_hyena_model():
-    cfg_path = Path("train_config/hyena_test.yaml")
+    cfg_path = Path(__file__).parent / "hyena_test.yaml"
     cfg = load_model_config(cfg_path)
     shutil.rmtree(cfg["training"]["data_dir"], ignore_errors=True)
     builder = DynamicModelBuilder(cfg)
@@ -314,7 +314,7 @@ def test_hyena_block_kernel_regularizer_serialization_roundtrip():
 def test_builder_hyena_block_regularizer_from_yaml(tmp_path):
     """Config keys kernel_regularizer/kernel_regularizer_w on hyena_block must
     be converted to a regularizer instance by the builder."""
-    cfg = load_model_config(Path("train_config/hyena_test.yaml"))
+    cfg = load_model_config(Path(__file__).parent / "hyena_test.yaml")
     for layer in cfg["model"]["representation_learner"]["hidden_layers"]:
         if layer["name"] == "hyena_block":
             layer["config"]["kernel_regularizer"] = "l2"
