@@ -56,5 +56,5 @@ PY
 
 %labels
     Author: "Yasas Wijesekara"
-    Version: "1.26.4"
+    Version: "1.26.5"
     Description: "Apptainer container with Jaeger[dev] and TensorFlow GPU support"

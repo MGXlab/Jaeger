@@ -1,5 +1,5 @@
 {% set name = "jaeger-bio" %}
-{% set version = "1.26.4" %}
+{% set version = "1.26.5" %}
 
 package:
   name: "{{ name|lower }}"
